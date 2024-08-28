@@ -1,27 +1,35 @@
 #!/usr/bin/env python
 
 import argparse
+import json
+from collections import defaultdict as dd
 from enum import Enum
+import logging
 import re
 import sys
-from typing import List, Tuple, Callable, Text
+from typing import List, Tuple, Callable, Text, Dict
 
-from parsita import *
-
-
-naughty_chars = re.compile(b'[^\n -~]+')
+from pgn_parser import pgn_file
 
 
-class PGNPart(Enum):
+logger = logging.getLogger(__name__)
+
+
+NAUGHTY_CHARS = re.compile(b'[^\n -~]+')
+
+
+class PGNParts(Enum):
     ANNOTATION = 1
     MOVES = 2
     NEWLINE = 3
 
 
+# PGN parts can be identified by the first character of the line,
+# which helps break a PGN file into its constituent parts.
 LINE_TYPE = {
-    b'[': PGNPart.ANNOTATION,
-    b'1': PGNPart.MOVES,
-    b'\n': PGNPart.NEWLINE,
+    b'[': PGNParts.ANNOTATION,
+    b'1': PGNParts.MOVES,
+    b'\n': PGNParts.NEWLINE,
 }
 
 
@@ -32,7 +40,7 @@ class ArgumentParser(argparse.ArgumentParser):
 
 
 def get_args(argv: List[str]) -> Tuple[
-        argparse.Namespace, argparse.ArgumentParser]:
+        argparse.Namespace, ArgumentParser]:
     parser = ArgumentParser(
         prog='./parse_pgn.py',
         description='Parse PGN file(s) and stream(s): '
@@ -40,124 +48,91 @@ def get_args(argv: List[str]) -> Tuple[
                     'parse tree to a function.')
     parser.add_argument('--file', '-f', dest='pgn_path',
                         type = str, action = 'store', default = '-')
+    parser.add_argument('--output', '-o', dest='out_path',
+                        type = str, action = 'store', default = '/dev/stdout')
     return parser.parse_args(argv), parser
 
 
 class PGNParser:
-    def __init__(self, pgn_path: str, parse_cb: Callable[[str], None] = None):
+    def __init__(self, pgn_path: str, parse_cb: Callable[[Dict], None] = None):
         self.pgn_path = pgn_path
-        self.pgn_file = open(self.pgn_path, 'rb')
+        self.pgn_file = open(self.pgn_path, 'rb')  # PGNs are UTF-8 encoded, e.g. "Réti Opening"
         self.parse_cb = parse_cb
         self.result = None
 
     def get_pgn(self):
+        # Saw off PGN hunks
         buf = []
-        this_kind, prev_kind = None, None
+        this_type, prev_type = None, None
         count = 0
         while line := self.pgn_file.readline():
-            # line = self.pgn_file.readline()
-            this_kind = LINE_TYPE.get(line[:1])
-            if this_kind == PGNPart.ANNOTATION and prev_kind == PGNPart.MOVES:
+            this_type = LINE_TYPE.get(line[:1])
+            if ( this_type == PGNParts.ANNOTATION and
+                    prev_type == PGNParts.MOVES ):
                 final = b"\n".join(buf)
-                final_utf8 = naughty_chars.sub(b'_', final, 999).decode('utf-8')
-                import pudb; pu.db
+                # When annotations contain non-ASCII characters, wipe them out
+                # because parsita doesn't handle them well.
+                final_utf8 = NAUGHTY_CHARS.sub(
+                    b'_', final, 999).decode('utf-8')
                 yield final_utf8
-                print(f"count: {count}")
                 count += 1
+                if count % 1000 == 0:
+                    print(f"count: {count}")
                 buf.clear()
                 buf = [line[:-1]]
             else:
                 buf.append(line[:-1])
 
-            if this_kind is not PGNPart.NEWLINE:
-                prev_kind = this_kind
+            if this_type is not PGNParts.NEWLINE:
+                prev_type = this_type
 
     @classmethod
     def parse(cls, pgn: Text):
-
-        # if naughty_chars.match(pgn):
-        #     import pudb; pu.db
-
-        return cls.pgn_file.parse(pgn)
+        return pgn_file.parse(pgn)
 
     def parse_stream(self):
         for pgn in self.get_pgn():
-            r = self.result = PGNParser.parse(pgn)
-            import pudb; pu.db
-            if self.parse_cb:
-                self.parse_cb(self.result)
-
-    def formatannotations(annotations):
-        return {ant[0]: ant[1] for ant in annotations}
-
-    def formatgame(game):
-        return {
-            'moves': game[0],
-            'outcome': game[1]
-        }
-
-    def formatentry(entry):
-        return {'annotations': entry[0], 'game': entry[1]}
-
-    def handleoptional(optionalmove):
-        if len(optionalmove) > 0:
-            return optionalmove[0]
-        else:
-            return None
-
-    # Define Grammar by building up from smallest components
-
-    # tokens
-    quote = lit(r'"')
-    whitespace = lit(' ') | lit('\n')
-    tag = reg(r'[\u0021-\u0021\u0023-\u005A\u005E-\u007E]+')
-    string = reg(r'[\u0020-\u0021\u0023-\u005A\u005E-\U0010FFFF]+')
-
-    # Annotations: [Foo "Super Awesome Information"]
-    annotation = "[" >> tag << " " & (quote >> string << quote) << "]"
-    annotations = repsep(annotation, '\n') > formatannotations
-
-    # Moves are more complicated
-    regularmove = reg(
-        r'[a-h1-8NBRQKx\+#=]+')  # Matches more than just chess moves
-    longcastle = reg(
-        r'O-O-O[+#]?')  # match first to avoid castle matching spuriously
-    castle = reg(r'O-O[+#]?')
-    nullmove = lit('--')  # Illegal move rarely used in annotations
-
-    # LiChess annotations
-    moveAnnotation = reg(r'\{[^}]*\}')
-
-    # Possible move types
-    move = (regularmove | longcastle | castle | nullmove)
-
-    # Build up the game
-    movenumber = (reg(r'[0-9]+') << '.' << whitespace) > int
-    turn = movenumber & (move << whitespace & (opt(moveAnnotation << whitespace))) & (
-                opt(move << whitespace & (opt(moveAnnotation << whitespace))) > handleoptional)
-
-    draw = lit('1/2-1/2')
-    white = lit('1-0')
-    black = lit('0-1')
-    outcome = draw | white | black
-
-    game = (rep(turn) & outcome) > formatgame
-
-    # A PGN entry is annotations and the game
-    entry = ((annotations << rep(whitespace)) & (
-                game << rep(whitespace))) > formatentry
-
-    # A file is repeated entries
-    pgn_file = rep(entry)
+            # print(pgn,"\n\n")
+            result = pgn_file.parse(pgn)  # PGNParser.parse(pgn)
+            if isinstance(result, Success):
+                result = result.unwrap()
+                if self.parse_cb:
+                    self.parse_cb(result)
+                else:
+                    # There should only be one PGN per result, as get_pgn()
+                    # segments the file or stream into single PGNs.
+                    yield result[0]
+            else:
+                logger.error(f"Error parsing PGN: {pgn}")
+                logger.error(result)
 
 
 def main(argv):
     args, parser = get_args(argv)
     parser = PGNParser(pgn_path=args.pgn_path)
-    parser.parse_stream()
+    movestr = dd(int)
+    mc = 0
+    for pgn in parser.parse_stream():
+        for num, a_move in enumerate(pgn['game']['moves']):
+            try:
+                if a_move:
+                    mc += 1
+                    if a_move['white']:
+                        movestr[a_move['white'][0]] += 1
+                    else:
+                        logger.error("empty white move! at {num} in {pgn}")
+                    if a_move['black']:
+                        movestr[a_move['black'][0]] += 1
+                else:
+                    logger.error("empty move! at {num} in {pgn}")
+            except Exception as e:
+                import pudb; pu.db
+                x = 1
+    with open(args.out_path, "w") as f:
+        f.write(f"Moves {mc}\n")
+        f.write(f"AN: {sorted(movestr.keys())}\n\n")
+        f.write(json.dumps(movestr, indent=4))
 
 
 if __name__ == '__main__':
-    a = main(sys.argv[1:])
-    import pudb; pu.db
-    x = 1
+    main(sys.argv[1:])
