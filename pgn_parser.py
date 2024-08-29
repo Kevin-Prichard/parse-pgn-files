@@ -1,6 +1,6 @@
 import logging
 
-from parsita import *
+from parsita import lit, opt, reg, rep, repsep
 
 """
 PGN grammar-parser
@@ -57,21 +57,32 @@ def handle_move(move):
                          # Black comment @ [2][1][1][0]
                          ['{ [%eval 0.07] [%clk 0:05:00] }']]]]
     """
+    # TODO: param 'move' is ugly and convoluted, I would like to restructure
+    #  it, tho generally that means functions,
+    #  which tend to decrease performance
 
     res = None
     try:
+        # Base rsponse w/White's move
         res = {
             'num': move[0],
-            'white': (move[1][0][0], move[1][0][1][0] if move[1][0][1] else None, move[1][1][0] if move[1][1] else None),
+            'white': (move[1][0][0],
+                      move[1][0][1][0] if move[1][0][1] else None,
+                      move[1][1][0] if move[1][1] else None),
             'black': None,
         }
+
         # Handle split move for Black
         if move[2] and isinstance(move[2][0], int) and move[2][1]:
-            res['black'] = (move[2][1][0][0], move[2][1][0][1][0] if move[2][1][0][1] else None, move[2][1][1][0] if move[2][1][1] else None)
+            res['black'] = (move[2][1][0][0],
+                            move[2][1][0][1][0] if move[2][1][0][1] else None,
+                            move[2][1][1][0] if move[2][1][1] else None)
 
         # Regular move for Black
         elif move[2] and isinstance(move[2][0], list):
-            res['black'] = (move[2][0][0], move[2][0][1][0] if move[2][0][1] else None, move[2][1][0] if move[2][1] else None)
+            res['black'] = (move[2][0][0],
+                            move[2][0][1][0] if move[2][0][1] else None,
+                            move[2][1][0] if move[2][1] else None)
 
     except Exception as e:
         logger.error(f"Error handling move: {move}")
