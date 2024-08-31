@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+#cython: language_level=3
+
 import logging
 import time
 
@@ -104,16 +106,6 @@ rank = lit(*list(rank_chars))
 locator = file | rank
 square = file & rank > square_fmt
 
-# There are approximately the following possible move types (& probably more)-
-# Pawn moves: 8**2 [64]
-# Pawn takes: 8**2 [64]
-# Singular piece moves: 6 Pieces to 8**2 squares [384] (Nf3, Bb5, Rd1, Qe2, Kf1, Kg1)
-# Singular piece takes: 6 Pieces to 8**2 squares [384] (Nxf3, Bxb5, Rxd1, Qxe2, Kxf1, Kxg1)
-# Plural piece moves: 5 pieces (sans king) * 16 rank or file locators, to 8**2 squares [5120] (Ncf3, Bbf3, R8d1, Q4e2, Kg2, Kf1)
-# Plural piece takes: 5 pieces (sans king) * 16 rank or file locators, to 8**2 squares [5120] (Ncxf3, Bbxf3, R8xd1, Q4xe2)
-# Castling moves: 2
-# Total: 64 + 384 + 384 + 5120 + 5120 + 2 = 10810 possible moves.  I think.
-
 move = (square  # pawn
         | (piece & square > move_singular)  # singular piece
         | (plural & locator & square > move_plural)  # plural piece, from locator
@@ -127,9 +119,22 @@ capture = ((file & take & square > take_by_pawn)  # pawn
            )
 
 conversion = (square & convert & plural) > conversion_fmt
-take_conversion = (file & take & square & convert & plural) > conversion_fmt
 
-agn = move | capture | conversion | take_conversion
+capture_conversion = (file & take & square & convert & plural) > conversion_fmt
+
+# algebraic notation grammar-parser, complete
+agn = move | capture | conversion | capture_conversion
+
+# There are approximately the following possible move types (& probably more)-
+# Pawn moves: 8**2 [64]
+# Pawn takes: 8**2 [64]
+# Singular piece moves: 6 Pieces to 8**2 squares [384] (Nf3, Bb5, Rd1, Qe2, Kf1, Kg1)
+# Singular piece takes: 6 Pieces to 8**2 squares [384] (Nxf3, Bxb5, Rxd1, Qxe2, Kxf1, Kxg1)
+# Plural piece moves: 5 pieces (sans king) * 16 rank or file locators, to 8**2 squares [5120] (Ncf3, Bbf3, R8d1, Q4e2, Kg2, Kf1)
+# Plural piece takes: 5 pieces (sans king) * 16 rank or file locators, to 8**2 squares [5120] (Ncxf3, Bbxf3, R8xd1, Q4xe2)
+# Castling moves: 2
+# Total: 64 + 384 + 384 + 5120 + 5120 + 2 = 10810 possible moves.  I think.
+
 
 """
 [X] 1a. Get this parser working!
@@ -137,11 +142,12 @@ agn = move | capture | conversion | take_conversion
 2a. Eventually look into adding helper classes to parsita to transform a grammar to another grammar syntax, such as ANTLR or yacc etc
 2b. This to produce a faster-executing version of a parser
 3a. In the meantime, split up mega tasks using threads or multitasking, utilising concurrent dicts and structures 
-3b. Consider also mypy and other python "compilers"
+3b. Consider also pypy and Cython and other python compilers/transpilers
 """
 
 
 def main():
+    # This main() exists to validate agn, the algebraic notation parser
     from result import AN
     t0 = time.time()
     for mv in AN:
@@ -153,8 +159,8 @@ def main():
             logger.error("Exception parsing '%s' with agn parser", mv)
 
     dur = time.time() - t0
-    print("time: {dur}, pieces/sec: {ps}, moves: {ln}",
-          {"dur": dur, "ps": len(AN)/dur, "ln": len(AN)})
+    print("time: {dur:7.2f}, pieces/sec: {ps:7.2f}, moves: {ln}".format(
+          dur=dur, ps=len(AN)/dur, ln=len(AN)))
 
 
 if __name__ == "__main__":
