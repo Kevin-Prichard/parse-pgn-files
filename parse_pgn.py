@@ -31,6 +31,7 @@ class PGNParts(Enum):
 
 
 LINE_TYPE = {
+    b'': PGNParts.ANNOTATION,
     b'[': PGNParts.ANNOTATION,
     b'1': PGNParts.MOVES,
     b'\n': PGNParts.NEWLINE,
@@ -71,8 +72,12 @@ class PGNParser:
         count = 0
         start_time = last_time = time.time()
         todo = 34869171
-        while line := self.pgn_file.readline():
+        keep_going = True
+        while keep_going:
+            line = self.pgn_file.readline()
             this_type = LINE_TYPE.get(line[:1])
+            if not line:
+                keep_going = False
             if ( this_type == PGNParts.ANNOTATION and
                     prev_type == PGNParts.MOVES ):
                 final = b"\n".join(buf)
@@ -82,7 +87,7 @@ class PGNParser:
                     b'_', final, 999).decode('utf-8')
                 yield final_utf8
                 count += 1
-                if count % 1000 == 0:
+                if count % 100 == 0:
                     this_time = time.time()
                     # seconds_per_k = this_time - last_time
                     time_per_k = (this_time - start_time) / (count / 1000)
