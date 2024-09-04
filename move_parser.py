@@ -20,6 +20,12 @@ def locator_fmt(locator):
     return locator[0] + locator[1]
 
 
+def move_pawn(content):  # pawn move formatter
+    return {"piece": "P",
+            "action": "move",
+            "target": content}
+
+
 def move_singular(content):  # singular piece move formatter
     return {"piece": content[0],
             "action": "move",
@@ -70,20 +76,26 @@ def take_plural(content):
     return res
 
 
-def conversion_fmt(content):
+def promotion_fmt(content):
     if content[1] == '=':
         return {
             "piece": "P",
+            "action": "promote",
             "actor_square": content[0],
             "replacement": content[2],
         }
     elif content[1] == 'x':
-        return {
+        return [{
+            "piece": content[4],
+            "action": "capture",
+            "target": content[2],
+        }, {
             "piece": "P",
+            "action": "promote",
             "actor_file": content[0],
             "target": content[2],
             "replacement": content[4],
-        }
+        }]
     logger.error("Did not handle pawn conversion: {content}", {"content": content})
 
 
@@ -106,7 +118,7 @@ rank = lit(*list(rank_chars))
 locator = file | rank
 square = file & rank > square_fmt
 
-move = (square  # pawn
+move = ((square > move_pawn)  # pawn
         | (piece & square > move_singular)  # singular piece
         | (plural & locator & square > move_plural)  # plural piece, from locator
         | (plural & square & square > move_plural)  # plural piece, from square
@@ -118,9 +130,9 @@ capture = ((file & take & square > take_by_pawn)  # pawn
            | (plural & locator & take & square > take_plural)  # plural piece
            )
 
-conversion = (square & convert & plural) > conversion_fmt
+conversion = (square & convert & plural) > promotion_fmt
 
-capture_conversion = (file & take & square & convert & plural) > conversion_fmt
+capture_conversion = (file & take & square & convert & plural) > promotion_fmt
 
 # algebraic notation grammar-parser, complete
 agn = move | capture | conversion | capture_conversion
@@ -139,10 +151,10 @@ agn = move | capture | conversion | capture_conversion
 """
 [X] 1a. Get this parser working!
 [X] 1b. Make it yield usable structures
-2a. Eventually look into adding helper classes to parsita to transform a grammar to another grammar syntax, such as ANTLR or yacc etc
-2b. This to produce a faster-executing version of a parser
-3a. In the meantime, split up mega tasks using threads or multitasking, utilising concurrent dicts and structures 
-3b. Consider also pypy and Cython and other python compilers/transpilers
+[ ] 2a. Eventually look into adding helper classes to parsita to transform a grammar to another grammar syntax, such as ANTLR or yacc etc
+        - This to produce a faster-executing version of a parser
+[X] 3a. In the meantime, split up mega tasks using threads or multitasking, utilising concurrent dicts and structures (multiprocessing worked very well) 
+[X] 3b. Consider also pypy and Cython and other python compilers/transpilers (cython3 produces 15% slower result)
 """
 
 
