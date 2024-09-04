@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #cython: language_level=3
 
 import argparse
@@ -59,7 +59,8 @@ def get_args(argv: List[str]) -> Tuple[argparse.Namespace, ArgumentParser]:
     parser.add_argument('--output', '-o', dest='out_path',
                         type=str, action='store', default='/dev/stdout')
     parser.add_argument('--processes', '-p', dest='process_count',
-                        type=int, action='store', default=mp.cpu_count())
+                        type=int, action='store', default=mp.cpu_count(),
+                        help='Number of processes to use; 1=single tasking')
     parser.add_argument('--limit', '-l', dest='pgn_limit',
                         type=int, action='store', default=0)
     parser.add_argument('--queue_limit', '-q', dest='queue_limit',
@@ -143,7 +144,8 @@ def pgn_worker(queue: Queue, queue_id: Text, process_count: int):
     logging.info("PROCESSQ: %s, %s -- %%%%%%%%%%%%",
                  str(queue), str(queue_id))
     work_count = 0
-    results = dict({"gcount": 0, "mcount": 0, "moves": dict()})
+    results = dict({
+        "gcount": 0, "mcount": 0, "moves": dict(), "ograph": dict()})
     while True:
         time.sleep(0.001)
         qsize = queue.qsize()
@@ -170,7 +172,17 @@ def pgn_worker(queue: Queue, queue_id: Text, process_count: int):
                           str(mp.current_process()))
 
 
-def process_history(pgn_parser: PGNStreamSlicer, process_count: int, pgn_limit: int, queue_limit: int):
+def process_games_single(pgn_parser: PGNStreamSlicer, pgn_limit: int):
+    results = dict({
+        "gcount": 0, "mcount": 0, "moves": dict(), "ograph": dict()})
+    for pgn_num, pgn in enumerate(pgn_parser.next()):
+        handle_pgn(pgn, results)
+        if pgn_limit and pgn_num > pgn_limit:
+            break
+    return results
+
+
+def process_games_multi(pgn_parser: PGNStreamSlicer, process_count: int, pgn_limit: int, queue_limit: int):
     queues = dict()
     processes = []
     process_to_queue = dict()
@@ -239,13 +251,16 @@ def process_history(pgn_parser: PGNStreamSlicer, process_count: int, pgn_limit: 
 def main(argv):
     args, parser = get_args(argv)
     parser = PGNStreamSlicer(pgn_path=args.pgn_path)
-    move_stats = process_history(parser, args.process_count, args.pgn_limit, args.queue_limit)
+    if args.process_count > 1:
+        move_stats = process_games_multi(parser, args.process_count, args.pgn_limit, args.queue_limit)
+    else:
+        move_stats = process_games_single(parser, args.pgn_limit)
 
     with open(args.out_path, "w") as f:
         f.write(json.dumps({
             "game_count": move_stats['gcount'],
             "move_count": move_stats['mcount'],
-            "moves": sorted(move_stats.keys()),
+            "moves": sorted(move_stats['moves'].keys()),
             "stats": {k: v for k, v in move_stats.items()},
         }))
 

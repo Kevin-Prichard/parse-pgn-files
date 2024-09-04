@@ -120,7 +120,7 @@ move_annotation = rep(
     lit('⌓') |   # better move than the one played
     lit('□') |   # forced move; the only reasonable move, or the only move available
     lit('TN') | lit('NA')   # or NA
-)  # > move_annotation_handler
+)
 
 # LiChess annotations
 move_comment = reg(r'\{[^}]*\}')

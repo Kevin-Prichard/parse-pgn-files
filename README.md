@@ -23,7 +23,7 @@ http://www.saremba.de/chessgml/standards/pgn/pgn-complete.htm
   - ensuring a PGN's game moves correctly export as JSON
 - move_parser.py: a Parsita grammar-parser for breaking down algebraic notation into detailed dicts (not currently used in the project, but defined for future use)
 - parse_pgn.py: a script for parsing a PGN files and streams
-  - it  provides options for parsing a single PGN file, a file of multiple PGNs, or a pipe/stream of PGNs
+  - it provides options for parsing a single PGN file, a file of multiple PGNs, or a pipe/stream of PGNs
   - in current form it generates basic statistics from counted games, such as moves
   - it provides options to run across multiple cores using the multiprocessing module
   - it can output results to a JSON file
