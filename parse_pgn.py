@@ -2,6 +2,7 @@
 #cython: language_level=3
 
 import argparse
+import copy
 from collections import defaultdict as dd
 from enum import Enum
 import json
@@ -14,6 +15,7 @@ import time
 from typing import List, Tuple, Callable, Text, Dict
 
 from pgn_parser import pgn_file
+from move_parser import agn, FILE_CHARS
 
 from parsita import Success
 
@@ -35,7 +37,7 @@ class PGNParts(Enum):
 
 
 LINE_TYPE = {
-    b'': PGNParts.ANNOTATION,
+    b'': PGNParts.ANNOTATION,  # Empty line w/o \n signals end-of-file & treated same as annotation
     b'[': PGNParts.ANNOTATION,
     b'1': PGNParts.MOVES,
     b'\n': PGNParts.NEWLINE,
@@ -107,17 +109,185 @@ todo = 34869171
 
 m = mp.Manager()
 
+POINTS = {'P': 1, 'N': 3, 'B': 3, 'R': 5, 'Q': 9}
+
+"""
+PROBLEM: we don't know which piece is is being taken, some of the time.
+We need a basic headless board to know what piece exists at a location,
+and then we can determine the value of the move.
+"""
+class Piece:
+    def __init__(self, piece: str, side: str, rank: int, file: int):
+        self.side = side  # 'B' or 'W'
+        self.piece = piece
+        self.rank = rank
+        self.file = file
+
+    def move_pattern(self):
+        pass
+
+    def move(self, square):
+        self.file = square[0]
+        self.rank = int(square[1])
+
+    def __repr__(self):
+        return f"{self.piece} at {self.rank}, {self.file}"
+
+
+PIECES = ['P', 'N', 'B', 'R', 'Q', 'K']
+FILES = {f: i for i, f in enumerate('abcdefgh')}
+BOARD_STD = [
+    ['RW', 'NW', 'BW', 'QW', 'KW', 'BW', 'NW', 'RW'],
+    ['PW'] * 8,
+    EMPTY := [None] * 8,
+    copy.copy(EMPTY),
+    copy.copy(EMPTY),
+    copy.copy(EMPTY),
+    ['PB'] * 8,
+    ['RB', 'NB', 'BB', 'QB', 'KB', 'BB', 'NB', 'RB'],
+]
+
+
+FILE_BASE = ord('a')
+
+
+class Board:
+    def __init__(self):
+        self.board = copy.deepcopy(BOARD_STD)
+        self.pieces = dict()
+
+    def get(self, square):
+        return self.board[int(square[1])-1][ord(square[0])-FILE_BASE]
+
+    def set(self, square, piece=None, side=None):
+        self.board[int(square[1])-1][ord(square[0])-FILE_BASE] = f"{piece}{side}" if piece else None
+
+    def by_file(self, file, piece, side):
+        ps = f"{piece}{side}"
+        res = []
+        file_no = ord(file) - FILE_BASE
+        for rank in range(8):
+            if self.board[rank][file_no] == ps:
+                res.append(f"{file}{rank+1}")
+        return res
+
+    def by_rank(self, rank, piece, side):
+        ps = f"{piece}{side}"
+        res = []
+        rank_no = int(rank)
+        for file in FILE_CHARS:
+            if self.board[rank][file_no] == ps:
+                res.append(f"{file}{rank+1}")
+        return res
+
+    def by_piece(self, piece, side):
+        ps = f"{piece}{side}"
+        res = []
+        for rank in range(8):
+            for file in range(8):
+                if self.board[rank][file] == ps:
+                    res.append(f"{chr(FILE_BASE+file)}{rank+1}")
+        return res
+
+    def move(self, m, side):
+        points = 0
+        if 'actor_file' in m:
+            squares = self.by_file(m['actor_file'], m['piece'], side)
+            if len(squares) != 1:
+                raise ValueError(f"Multiple same piece type on file {m['actor_file']}")
+            old = squares[0]
+            new = m['target']
+        elif 'actor_rank' in m:
+            squares = self.by_rank(m['actor_rank'], m['piece'], side)
+            if len(squares) != 1:
+                raise ValueError(f"Multiple same piece type on file {m['actor_rank']} from {m}")
+            old = squares[0]
+            new = m['target']
+        elif 'actor_square' in m:
+            old = m['actor_square']
+            new = m['target']
+        else:
+            squares = self.by_piece(m['piece'], side)
+            if len(squares) == 0:
+                raise ValueError(f"No pieces of type {m} on board")
+            if m['piece'] != 'P':
+                raise ValueError(f"Moving piece is not pawn and no rank, file or square: {m}")
+            squares = [square for square in squares if square[0] == m['target'][0]]
+            if len(squares) != 1:
+                raise ValueError(f"Multiple pawns on file {m['target'][0]}")
+            if m['action'] == 'capture':
+                points = POINTS[self.get(m['target'])[0]]
+
+            old = squares[0]
+            new = m['target']
+
+        if m['action'] == 'capture':
+            points = POINTS[self.get(m['target'])[0]]
+
+        self.set(old, None)
+        self.set(new, m['piece'], side)
+        return points
+
+    def __repr__(self):
+        res = []
+        for rank in range(7, -1, -1):
+            row = []
+            for file in range(8):
+                piece = self.board[rank][file]
+                row.append(f"{piece if piece else ' ':3s}")
+            res.append(" ".join(row))
+        return "\n".join(res)
+
+
+def board(moves):
+    ograph = dict()
+    b = Board()
+    points = dd(int)
+
+    for a_move in moves:
+        if a_move:
+            for move, side in ((a_move['white'], 'W'), (a_move['black'], 'B')):
+                if move:
+                    mj = agn.parse(move[0]).unwrap()
+                    if not isinstance(mj, list):
+                        mj = [mj]
+                    for m in mj:
+                        print(json.dumps(m, sort_keys=True))
+                        points[side] += b.move(m, side)
+                        print(b,"\n")
+
+    import pudb; pu.db
+
+    """
+    if move[0] in ograph:
+        ograph[move[0]]['freq'] += 1
+    else:
+        ograph[move[0]] = {
+            'freq': 1,
+        }
+    if mj['action'] == 'capture':
+        import pudb;
+        pu.db
+        ograph[move[0]]['point'] = capture_points(mj)
+
+    ograph[a_move['white'][0]] = a_move['white'][1]
+    """
+
 
 def handle_pgn(pgn, results: dict):
     result = pgn_file.parse(pgn)
     if isinstance(result, Success):
         result = result.unwrap()[0]
         results['gcount'] += 1
+        board(result['game']['moves'])
+        return
 
         for num, a_move in enumerate(result['game']['moves']):
             try:
                 if a_move:
                     results['mcount'] += 1
+                    print("a_move['white']", a_move['white'])
+                    results['ograph'][a_move['white'][0]] = a_move['white'][1]
                     if a_move['white']:
                         if a_move['white'][0] in results["moves"]:
                             results["moves"][a_move['white'][0]] += 1
@@ -256,15 +426,15 @@ def main(argv):
     else:
         move_stats = process_games_single(parser, args.pgn_limit)
 
+    """
     with open(args.out_path, "w") as f:
         f.write(json.dumps({
             "game_count": move_stats['gcount'],
             "move_count": move_stats['mcount'],
             "moves": sorted(move_stats['moves'].keys()),
             "stats": {k: v for k, v in move_stats.items()},
-        }))
-
-    return 0.0
+        })+"\n\n")
+    """
 
 
 if __name__ == "__main__":
