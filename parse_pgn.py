@@ -17,6 +17,7 @@ from typing import List, Tuple, Callable, Text, Dict
 from pgn_parser import pgn_file
 from move_parser import agn, FILE_CHARS
 
+from colored import fore, back, style
 from parsita import Success
 
 
@@ -51,6 +52,7 @@ class ArgumentParser(argparse.ArgumentParser):
 
 
 def get_args(argv: List[str]) -> Tuple[argparse.Namespace, ArgumentParser]:
+    global args
     parser = ArgumentParser(
         prog='./parse_pgn.py',
         description='Parse PGN file(s) and stream(s): '
@@ -67,13 +69,74 @@ def get_args(argv: List[str]) -> Tuple[argparse.Namespace, ArgumentParser]:
                         type=int, action='store', default=0)
     parser.add_argument('--queue_limit', '-q', dest='queue_limit',
                         type=int, action='store', default=250)
-    return parser.parse_args(argv), parser
+    parser.add_argument('--show', '-s', dest='show_board',
+                        action='store_true', default=False)
+    parser.add_argument('--inter', '-i', dest='interactive',
+                        action='store_true', default=False)
+    parser.add_argument('--colors', '-c', dest='colors',
+                        type=str, action='store', default='blue_purple')
+    parser.add_argument('--style', '-y', dest='piece_style',
+                        type=str, action='store', default='solid')
+    parser.add_argument('--game', '-g', dest='game_num_interactive',
+                        type=int, action='store', default=None)
+
+    return (args := parser.parse_args(argv), parser)
+
+
+COLOR_SCHEMES = {
+    'black_white': (black_white:={
+        'black': 'black',
+        'white': 'white',
+        'dark': 'black',
+        'light': 'white',
+    }),
+    'bw': black_white,
+    'green_gold': {
+        'black': 'dark_green',
+        'white': 'gold_1',
+        'dark': 'dark_olive_green_1b',
+        'light': 'tan',
+    },
+    'blue_purple': {
+        'black': 'purple_1a',
+        'white': 'gold_3a',
+        'dark': 'dark_blue',
+        'light': 'sky_blue_1',
+    },
+}
+
+SQUARE_COL = {0: 'light', 1: 'dark'}
+PIECE_COL = {'W': 'white', 'B': 'black'}
+
+"""
+'': {
+    'black': '',
+    'white': '',
+    'dark_space': '',
+    'light_space': '',
+},
+'': {
+    'black': '',
+    'white': '',
+    'dark_space': '',
+    'light_space': '',
+},
+'': {
+    'black': '',
+    'white': '',
+    'dark_space': '',
+    'light_space': '',
+},
+"""
 
 
 class PGNStreamSlicer:
     def __init__(self, pgn_path: str, parse_cb: Callable[[Dict], None] = None):
         self.pgn_path = pgn_path
-        self.pgn_file = open(self.pgn_path, 'rb')  # rb: PGNs are UTF-8 encoded, e.g. "Réti Opening"
+
+        # rb: PGNs are UTF-8 encoded, e.g. "Réti Opening"
+        self.pgn_file = open(self.pgn_path, 'rb')
+
         self.parse_cb = parse_cb
         self.result = None
 
@@ -87,7 +150,7 @@ class PGNStreamSlicer:
             this_type = LINE_TYPE.get(line[:1])
             if not line:
                 keep_going = False
-            if ( this_type == PGNParts.ANNOTATION and
+            if (this_type == PGNParts.ANNOTATION and
                     prev_type == PGNParts.MOVES ):
                 final = b"\n".join(buf)
                 # When annotations contain non-ASCII characters, wipe them out
@@ -116,6 +179,8 @@ PROBLEM: we don't know which piece is is being taken, some of the time.
 We need a basic headless board to know what piece exists at a location,
 and then we can determine the value of the move.
 """
+
+
 class Piece:
     def __init__(self, piece: str, side: str, rank: int, file: int):
         self.side = side  # 'B' or 'W'
@@ -151,8 +216,8 @@ BOARD_STD = [
 FILE_BASE = ord('a')
 OPPO = {'W': 'B', 'B': 'W'}
 DISPLAY = {
-    'RW': '♜', 'NW': '♞', 'BW': '♝', 'QW': '♛', 'KW': '♚', 'PW': '♟',
-    'RB': '♖', 'NB': '♘', 'BB': '♗', 'QB': '♕', 'KB': '♔', 'PB': '♙',
+    'solid': {'R': '♜', 'N': '♞', 'B': '♝', 'Q': '♛', 'K': '♚', 'P': '♟',},
+    'outline': {'R': '♖', 'N': '♘', 'B': '♗', 'Q': '♕', 'K': '♔', 'P': '♙',}
 }
 
 
@@ -213,11 +278,13 @@ def dests_bishop(square):
                         ((-1, 1), (1, 1),
                          (1, -1), (-1, -1)))
 
+
 def dests_rook(square):
     # Clockwise from 9:00
     return dests_radial(square,
                         ((-1, 0), (0, 1),
                          (1, 0), (0, -1)))
+
 
 def dests_queen(square):
     return dests_radial(square,
@@ -230,17 +297,30 @@ def dests_pawn(square, side):
     dests = set()
     start = mk_coords(square)
     if side == 'W':
+        # move
         if start[1] == 1:
             dests.add(mk_square(start[0], 2))
             dests.add(mk_square(start[0], 3))
         else:
             dests.add(mk_square(start[0], start[1] + 1))
+        # capture
+        capture_dir = 1
     elif side == 'B':
+        # move
         if start[1] == 6:
             dests.add(mk_square(start[0], 5))
             dests.add(mk_square(start[0], 4))
         else:
             dests.add(mk_square(start[0], start[1] - 1))
+        # capture
+        capture_dir = -1
+    else:
+        raise ValueError(f"Unexpected side: {side}")
+
+    for way in (-1, 1):
+        dests.add(mk_square(start[0] - way, start[1] + capture_dir))
+        dests.add(mk_square(start[0] + way, start[1] + capture_dir))
+
     return dests
 
 
@@ -253,7 +333,12 @@ class Board:
         return self.board[int(square[1])-1][ord(square[0])-FILE_BASE]
 
     def set(self, square, piece=None, side=None):
-        self.board[int(square[1])-1][ord(square[0])-FILE_BASE] = f"{piece}{side}" if piece else None
+        try:
+            self.board[int(square[1])-1][ord(square[0])-FILE_BASE] = f"{piece}{side}" if piece else None
+        except Exception as ee:
+            print(self)
+            import pudb; pu.db
+            x = 1
 
     def capture(self, square, by_side):
         pass
@@ -305,7 +390,6 @@ class Board:
     def castle(self, m, side):
         rank = 1 if side == 'W' else 8
         king_origin = f'e{rank}'
-        # import pudb; pu.db
         # kingside
         if m['target'] == 'O-O':
             king_dest = f'g{rank}'
@@ -326,18 +410,43 @@ class Board:
     def move(self, m, side):
         points = 0
         old, new = None, None
+        # print(m)
         if 'actor_file' in m:
             squares = self.by_file(m['actor_file'], m['piece'], side)
-            if len(squares) != 1:
-                raise ValueError(f"Multiple same piece type on file {m['actor_file']}")
-            old = squares[0]
-            new = m['target']
+            import pudb; pu.db
+
+            # Iterate current origin squares of matching pieces
+            for piece_square in squares:
+
+                # Is the current move's destination in one of the piece's
+                # possible destinations?
+                if m['target'] in self.piece_dests(
+                        piece=m['piece'], start_square=piece_square, side=side):
+                    old = piece_square
+                    new = m['target']
+                    break
+            # if len(squares) != 1:
+            #     print(self)
+            #     import pudb; pu.db
+            #     raise ValueError(f"Multiple same piece type on file {m}")  # ['actor_file']
+            # old = squares[0]
+            # new = m['target']
         elif 'actor_rank' in m:
             squares = self.by_rank(m['actor_rank'], m['piece'], side)
-            if len(squares) != 1:
-                raise ValueError(f"Multiple same piece type on file {m['actor_rank']} from {m}")
-            old = squares[0]
-            new = m['target']
+            # Iterate current origin squares of matching pieces
+            for piece_square in squares:
+
+                # Is the current move's destination in one of the piece's
+                # possible destinations?
+                if m['target'] in self.piece_dests(
+                        piece=m['piece'], start_square=piece_square, side=side):
+                    old = piece_square
+                    new = m['target']
+                    break
+            # if len(squares) != 1:
+            #     raise ValueError(f"Multiple same piece type on rank {m['actor_rank']} from {m}")
+            # old = squares[0]
+            # new = m['target']
         elif 'actor_square' in m:
             old = m['actor_square']
             new = m['target']
@@ -351,7 +460,6 @@ class Board:
             # (piece & square > move_singular)
 
             # Find squares of the piece type
-            # import pudb; pu.db
             squares = self.by_piece(m['piece'], side)
 
             # This guardrail should only indicate a bug in my code
@@ -382,11 +490,18 @@ class Board:
 
     def __repr__(self):
         res = []
+        cols = COLOR_SCHEMES[args.colors]
         for rank in range(7, -1, -1):
             row = []
             for file in range(8):
+                sq_col = (rank + file) % 2
                 piece = self.board[rank][file]
-                row.append(f"{DISPLAY[piece] if piece else ' ':2s}")
+                row.append(
+                    f"{back(cols[SQUARE_COL[sq_col]])}"
+                    f"{fore(cols[PIECE_COL[piece[1] if piece else 'B']])}"
+                    f"{DISPLAY[args.piece_style][piece[0]] if piece else ' ':1s}")
+                sq_col = int(not(sq_col))
+            row.append(f"{back('black')}{fore('white')}")
             res.append(" ".join(row))
         return "\n".join(res)
 
@@ -405,20 +520,33 @@ def board(moves, graph):
                     if not isinstance(mj, list):
                         mj = [mj]
                     for m in mj:
-                        print(sidemove:=f"{a_move['num']}{side}. ", json.dumps(m, sort_keys=True))
-                        # if sidemove == '7B. ':
-                        #     import pudb; pu.db
+                        if args.show_board:
+                            print(sidemove := f"{a_move['num']}{side}. ",
+                                  json.dumps(m, sort_keys=True))
                         points[side] += b.move(m, side)
-                        # import pudb; pu.db
-                        print(b,"\n")
-                        print(f"W:{points['W']}, B:{points['B']}")
-                        input()
-            key = (a_move['white'][0], a_move['black'][0], points['W'] - points['B'])
-            graph[key] = new_graph = dict()
-            graph = new_graph
-            print(graph_root)
+                        if args.show_board:
+                            print(b, "\n")
+                            print(f"W:{points['W']}, B:{points['B']}")
+                            if input().lower() == 'q':
+                                exit()
 
-    import pudb; pu.db
+            try:
+                key = (a_move['white'][0],
+                       a_move['black'][0] if a_move['black'] else None,
+                       points['W'] - points['B'])
+            except Exception as eee:
+                import pudb; pu.db
+                x = 1
+
+            if key in graph:
+                graph[key]['gcount'] += 1
+            else:
+                graph[key] = new_graph = dict(gcount=1)
+            graph = new_graph
+            if args.show_board:
+                print(graph_root)
+                if input().lower() == 'q':
+                    exit()
 
     """
     if move[0] in ograph:
