@@ -38,9 +38,9 @@ def move_plural(content):  # plural piece move formatter
            "target": content[2]}
     if len(content[1]) > 1:
         res.update(actor_square=content[1])
-    if content[1] in file_chars:
+    if content[1] in FILE_CHARS:
         res.update(actor_file=content[1])
-    elif content[1] in rank_chars:
+    elif content[1] in RANK_CHARS:
         res.update(actor_rank=content[1])
     return res
 
@@ -69,9 +69,9 @@ def take_plural(content):
     res = {"piece": content[0],
            "action": "capture",
            "target": content[3]}
-    if content[1] in file_chars:
+    if content[1] in FILE_CHARS:
         res.update(actor_file=content[1])
-    elif content[1] in rank_chars:
+    elif content[1] in RANK_CHARS:
         res.update(actor_rank=content[1])
     return res
 
@@ -109,11 +109,11 @@ castle = lit('O-O-O', 'O-O')
 take = lit('x')
 convert = lit('=')
 
-file_chars = "abcdefgh"
-file = lit(*list(file_chars))
+FILE_CHARS = "abcdefgh"
+file = lit(*list(FILE_CHARS))
 
-rank_chars = "12345678"
-rank = lit(*list(rank_chars))
+RANK_CHARS = "12345678"
+rank = lit(*list(RANK_CHARS))
 
 locator = file | rank
 square = file & rank > square_fmt

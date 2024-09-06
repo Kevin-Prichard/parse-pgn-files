@@ -149,6 +149,99 @@ BOARD_STD = [
 
 
 FILE_BASE = ord('a')
+OPPO = {'W': 'B', 'B': 'W'}
+DISPLAY = {
+    'RW': '♜', 'NW': '♞', 'BW': '♝', 'QW': '♛', 'KW': '♚', 'PW': '♟',
+    'RB': '♖', 'NB': '♘', 'BB': '♗', 'QB': '♕', 'KB': '♔', 'PB': '♙',
+}
+
+
+def mk_coords(square):
+    # returns array coordinates for self.board, (0..7, 0..7)
+    return ord(square[0])-FILE_BASE, int(square[1])-1
+
+
+def mk_square(*coords):
+    # returns algebraic: [a..h][1..8] from board coords (0..7, 0..7)
+    return f"{chr(FILE_BASE+coords[0])}{coords[1]+1}"
+
+
+def dests_common(square, coord_alters):
+    dests = set()
+    start = mk_coords(square)
+    for x, y in coord_alters:
+        new_file, new_rank = start[0]+x, start[1]+y
+        if 0 <= new_file <=7 and 0 <= new_rank <=7:
+            dests.add(mk_square(new_file, new_rank))
+
+    return dests
+
+
+def dests_radial(square, coord_alters):
+    dests = set()
+    start = mk_coords(square)
+    for x, y in coord_alters:
+        keep_on = True
+        new_file, new_rank = start[0], start[1]
+        while keep_on:
+            new_file += x
+            new_rank += y
+            if 0 <= new_file <= 7 and 0 <= new_rank <= 7:
+                dests.add(mk_square(new_file, new_rank))
+            else:
+                keep_on = False
+
+    return dests
+
+
+def dests_knight(square):
+    return dests_common(square,
+                        ((-2, 1), (-1, 2), (1, 2), (2, 1),
+                         (-2, -1), (-1, -2), (1, -2), (2, -1)))
+
+
+def dests_king(square):
+    return dests_common(square,
+                        ((-1, 1,), (0, 1), (1, 1),
+                         (-1, 0), (1, 0),
+                         (-1, -1), (0, -1), (1, -1)))
+
+
+def dests_bishop(square):
+    # Clockwise from 10:30
+    return dests_radial(square,
+                        ((-1, 1), (1, 1),
+                         (1, -1), (-1, -1)))
+
+def dests_rook(square):
+    # Clockwise from 9:00
+    return dests_radial(square,
+                        ((-1, 0), (0, 1),
+                         (1, 0), (0, -1)))
+
+def dests_queen(square):
+    return dests_radial(square,
+                        ((-1, 1), (0, 1), (1, 1),
+                         (-1, 0),         (1, 0),
+                         (-1, -1), (0, -1), (1, -1)))
+
+
+def dests_pawn(square, side):
+    dests = set()
+    start = mk_coords(square)
+    if side == 'W':
+        if start[1] == 1:
+            dests.add(mk_square(start[0], 2))
+            dests.add(mk_square(start[0], 3))
+        else:
+            dests.add(mk_square(start[0], start[1] + 1))
+    elif side == 'B':
+        if start[1] == 6:
+            dests.add(mk_square(start[0], 5))
+            dests.add(mk_square(start[0], 4))
+        else:
+            dests.add(mk_square(start[0], start[1] - 1))
+    return dests
 
 
 class Board:
@@ -161,6 +254,9 @@ class Board:
 
     def set(self, square, piece=None, side=None):
         self.board[int(square[1])-1][ord(square[0])-FILE_BASE] = f"{piece}{side}" if piece else None
+
+    def capture(self, square, by_side):
+        pass
 
     def by_file(self, file, piece, side):
         ps = f"{piece}{side}"
@@ -176,7 +272,7 @@ class Board:
         res = []
         rank_no = int(rank)
         for file in FILE_CHARS:
-            if self.board[rank][file_no] == ps:
+            if self.board[rank][rank_no] == ps:
                 res.append(f"{file}{rank+1}")
         return res
 
@@ -189,8 +285,47 @@ class Board:
                     res.append(f"{chr(FILE_BASE+file)}{rank+1}")
         return res
 
+    def piece_dests(self, piece, start_square, side=None):
+        match piece[0]:
+            case 'N':
+                return dests_knight(start_square)
+            case 'B':
+                return dests_bishop(start_square)
+            case 'R':
+                return dests_rook(start_square)
+            case 'P':
+                return dests_pawn(start_square, side=side)
+            case 'Q':
+                return dests_queen(start_square)
+            case 'K':
+                return dests_king(start_square)
+
+        raise ValueError(f"Unexpected piece type: {piece}, {side} {start_square}")
+
+    def castle(self, m, side):
+        rank = 1 if side == 'W' else 8
+        king_origin = f'e{rank}'
+        # import pudb; pu.db
+        # kingside
+        if m['target'] == 'O-O':
+            king_dest = f'g{rank}'
+            rook_origin = f'h{rank}'
+            rook_dest = f'f{rank}'
+        # queenside
+        elif m['target'] == 'O-O-O':
+            king_dest = f'c{rank}'
+            rook_origin = f'a{rank}'
+            rook_dest = f'd{rank}'
+        else:
+            raise ValueError(f"Attempted castling but no joy: {m}")
+        self.set(king_origin, None)
+        self.set(rook_origin, None)
+        self.set(king_dest, 'K', side=side)
+        self.set(rook_dest, 'R', side=side)
+
     def move(self, m, side):
         points = 0
+        old, new = None, None
         if 'actor_file' in m:
             squares = self.by_file(m['actor_file'], m['piece'], side)
             if len(squares) != 1:
@@ -206,20 +341,37 @@ class Board:
         elif 'actor_square' in m:
             old = m['actor_square']
             new = m['target']
+        elif m['piece'] == 'K' and m['target'][0] == 'O':
+            self.castle(m, side=side)
+            return 0
         else:
+            # Locate the piece: we know its type, but its origin square,
+            # rank or file wasn't mentioned in the algebraic.
+            # This block results from matching the rule:
+            # (piece & square > move_singular)
+
+            # Find squares of the piece type
+            # import pudb; pu.db
             squares = self.by_piece(m['piece'], side)
+
+            # This guardrail should only indicate a bug in my code
             if len(squares) == 0:
                 raise ValueError(f"No pieces of type {m} on board")
-            if m['piece'] != 'P':
-                raise ValueError(f"Moving piece is not pawn and no rank, file or square: {m}")
-            squares = [square for square in squares if square[0] == m['target'][0]]
-            if len(squares) != 1:
-                raise ValueError(f"Multiple pawns on file {m['target'][0]}")
-            if m['action'] == 'capture':
-                points = POINTS[self.get(m['target'])[0]]
 
-            old = squares[0]
-            new = m['target']
+            # Iterate current origin squares of matching pieces
+            for piece_square in squares:
+
+                # Is the current move's destination in one of the piece's
+                # possible destinations?
+                if m['target'] in self.piece_dests(
+                        piece=m['piece'], start_square=piece_square, side=side):
+                    old = piece_square
+                    new = m['target']
+                    break
+
+            if old is None or new is None:
+                raise ValueError(
+                    f"Moving piece isn't found: {m}")
 
         if m['action'] == 'capture':
             points = POINTS[self.get(m['target'])[0]]
@@ -234,15 +386,16 @@ class Board:
             row = []
             for file in range(8):
                 piece = self.board[rank][file]
-                row.append(f"{piece if piece else ' ':3s}")
+                row.append(f"{DISPLAY[piece] if piece else ' ':2s}")
             res.append(" ".join(row))
         return "\n".join(res)
 
 
-def board(moves):
+def board(moves, graph):
     ograph = dict()
     b = Board()
     points = dd(int)
+    r = graph_root = graph
 
     for a_move in moves:
         if a_move:
@@ -252,9 +405,18 @@ def board(moves):
                     if not isinstance(mj, list):
                         mj = [mj]
                     for m in mj:
-                        print(json.dumps(m, sort_keys=True))
+                        print(sidemove:=f"{a_move['num']}{side}. ", json.dumps(m, sort_keys=True))
+                        # if sidemove == '7B. ':
+                        #     import pudb; pu.db
                         points[side] += b.move(m, side)
+                        # import pudb; pu.db
                         print(b,"\n")
+                        print(f"W:{points['W']}, B:{points['B']}")
+                        input()
+            key = (a_move['white'][0], a_move['black'][0], points['W'] - points['B'])
+            graph[key] = new_graph = dict()
+            graph = new_graph
+            print(graph_root)
 
     import pudb; pu.db
 
@@ -279,7 +441,7 @@ def handle_pgn(pgn, results: dict):
     if isinstance(result, Success):
         result = result.unwrap()[0]
         results['gcount'] += 1
-        board(result['game']['moves'])
+        board(result['game']['moves'], graph=results['ograph'])
         return
 
         for num, a_move in enumerate(result['game']['moves']):
