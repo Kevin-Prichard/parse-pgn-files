@@ -1,0 +1,14 @@
+mkdir -p /home/chessan/db/torrents
+cd /home/chessan
+export CHESS_HOME=`pwd`
+apt install -y transmission-cli
+transmission-cli https://database.lichess.org/standard/lichess_db_standard_rated_2017-09.pgn.zst.torrent -w $CHESS_HOME/db
+
+transmission-cli https://database.lichess.org/standard/lichess_db_standard_rated_2017-10.pgn.zst.torrent -w $CHESS_HOME/db
+
+apt -y update
+apt install -y git python3.11 python3-pip python3.11-venv
+git clone https://github.com/Kevin-Prichard/parse-pgn-files.git
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt

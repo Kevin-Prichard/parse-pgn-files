@@ -1,0 +1,18 @@
+Build cpython-
+cd /home/kev/projs/cpython
+./configure
+make
+
+$ export PYTHONPATH=/home/kev/projs/chessan/venv/lib/python3.11/site-packages:/home/kev/projs/chessan/venv/lib64/python3.11/site-packages
+
+$ export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/home/kev/projs/cpython/build/lib.linux-x86_64-3.10
+
+$ cd /home/kev/projs/chessan/parse-pgn-files
+
+# Add following line to top of script containing main()
+#cython: language_level=3
+
+$ cython3 move_parser.py --embed
+
+$ gcc -o move_parser move_parser.c -I/home/kev/projs/cpython/Include -I/home/kev/projs/cpython -L/usr/lib/python3.10/config-3.10-x86_64-linux-gnu -L/usr/lib/x86_64-linux-gnu -lcrypt -ldl -lm  -lm -lc -lX11 -lpython3.10 -I/usr/include/python3.10 -Wno-unused-result -Wsign-compare -g -fstack-protector-strong -Wformat -Werror=format-security  -DNDEBUG -g -fwrapv -O2 -Wall
+
