@@ -81,7 +81,7 @@ def promotion_fmt(content):
         return {
             "piece": "P",
             "action": "promote",
-            "actor_square": content[0],
+            "target": content[0],
             "replacement": content[2],
         }
     elif content[1] == 'x':
@@ -101,9 +101,11 @@ def promotion_fmt(content):
 
 logger = logging.getLogger(__name__)
 
+PLURAL_PIECE_LITERALS = ('P', 'N', 'B', 'R', 'Q', 'K')
+piece = lit(*PLURAL_PIECE_LITERALS)
 
-piece = lit('P', 'N', 'B', 'R', 'Q', 'K')
-plural = lit('P', 'N', 'B', 'R', 'Q')
+SINGULAR_PIECE_LITERALS = ('P', 'N', 'B', 'R', 'Q')
+plural = lit(*SINGULAR_PIECE_LITERALS)
 
 castle = lit('O-O-O', 'O-O')
 take = lit('x')
