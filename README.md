@@ -21,7 +21,7 @@ http://www.saremba.de/chessgml/standards/pgn/pgn-complete.htm
   - converting move sequences into a list of dicts per move, with keys for move number, white move, black move, and commentary
   - handling LiChess's split move format (e.g. '1. e4  1... e5 2. Nf3 2... Nc6')
   - ensuring a PGN's game moves correctly export as JSON
-- move_parser.py: a Parsita grammar-parser for breaking down algebraic notation into detailed dicts (not currently used in the project, but defined for future use)
+- move_parser.py: a Parsita grammar-parser for breaking down algebraic notation into detailed dicts (used for board manipulation)
 - parse_pgn.py: a script for parsing a PGN files and streams
   - it provides options for parsing a single PGN file, a file of multiple PGNs, or a pipe/stream of PGNs
   - in current form it generates basic statistics from counted games, such as moves

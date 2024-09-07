@@ -59,31 +59,46 @@ def get_args(argv: List[str]) -> Tuple[argparse.Namespace, ArgumentParser]:
                     'parse PGNs and pass the resulting '
                     'parse tree to a function.')
     parser.add_argument('--file', '-f', dest='pgn_path',
-                        type=str, action='store', default='-')
+                        type=str, action='store', default='-',
+                        help="File from which one or more PGN blocks will be "
+                             "read.  For POSIX pipes use -f /dev/stdin")
     parser.add_argument('--output', '-o', dest='out_path',
-                        type=str, action='store', default='/dev/stdout')
+                        type=str, action='store', default='/dev/stdout',
+                        help="File to which JSON output will be written.")
     parser.add_argument('--processes', '-p', dest='process_count',
                         type=int, action='store', default=mp.cpu_count(),
                         help='Number of processes to use; 1=single tasking')
     parser.add_argument('--limit', '-l', dest='pgn_limit',
-                        type=int, action='store', default=0)
+                        type=int, action='store', default=0,
+                        help="Stop reading pgn_path after this many PGNs.")
     parser.add_argument('--queue_limit', '-q', dest='queue_limit',
-                        type=int, action='store', default=250)
+                        type=int, action='store', default=250,
+                        help="Pause enqueing when all queues are this full")
     parser.add_argument('--show', '-s', dest='show_board',
-                        action='store_true', default=False)
+                        action='store_true', default=False,
+                        help="Display board after each side moves")
     parser.add_argument('--inter', '-i', dest='interactive',
-                        action='store_true', default=False)
+                        action='store_true', default=False,
+                        help="Wait for user to hit enter after each move")
     parser.add_argument('--colors', '-c', dest='colors',
-                        type=str, action='store', default='blue_purple')
+                        type=str, action='store', default='blue_purple',
+                        help="Pick a color scheme for ANSI console: "
+                             "black_white, green_gold, blue_purple")
     parser.add_argument('--style', '-y', dest='piece_style',
-                        type=str, action='store', default='solid')
-    parser.add_argument('--game', '-g', dest='game_num_interactive',
-                        type=int, action='store', default=None)
+                        type=str, action='store', default='solid',
+                        help="Choose Unicode piece style: solid or outline")
+    parser.add_argument('--debug', '-d', dest='game_move_debug',
+                        type=str, action='store', default=None,
+                        help="Process only this game number's PGN starting at "
+                             "move #, i.e. -d 3,19 debugs at game 3, move 19 ")
 
-    return (args := parser.parse_args(argv), parser)
+    args = parser.parse_args(argv)
+    return args, parser
 
 
 COLOR_SCHEMES = {
+    # black & white: piece colors
+    # dark & light: space or square colors
     'black_white': (black_white:={
         'black': 'black',
         'white': 'white',
@@ -103,38 +118,23 @@ COLOR_SCHEMES = {
         'dark': 'dark_blue',
         'light': 'sky_blue_1',
     },
+    # '': {
+    #     'black': '',
+    #     'white': '',
+    #     'dark_space': '',
+    #     'light_space': '',
+    # },
 }
 
 SQUARE_COL = {0: 'light', 1: 'dark'}
 PIECE_COL = {'W': 'white', 'B': 'black'}
-
-"""
-'': {
-    'black': '',
-    'white': '',
-    'dark_space': '',
-    'light_space': '',
-},
-'': {
-    'black': '',
-    'white': '',
-    'dark_space': '',
-    'light_space': '',
-},
-'': {
-    'black': '',
-    'white': '',
-    'dark_space': '',
-    'light_space': '',
-},
-"""
 
 
 class PGNStreamSlicer:
     def __init__(self, pgn_path: str, parse_cb: Callable[[Dict], None] = None):
         self.pgn_path = pgn_path
 
-        # rb: PGNs are UTF-8 encoded, e.g. "Réti Opening"
+        # "rb": PGNs are UTF-8 encoded, e.g. "Réti Opening"
         self.pgn_file = open(self.pgn_path, 'rb')
 
         self.parse_cb = parse_cb
@@ -199,8 +199,7 @@ class Piece:
         return f"{self.piece} at {self.rank}, {self.file}"
 
 
-PIECES = ['P', 'N', 'B', 'R', 'Q', 'K']
-FILES = {f: i for i, f in enumerate('abcdefgh')}
+FILES = {f: i for i, f in enumerate(FILE_CHARS)}
 BOARD_STD = [
     ['RW', 'NW', 'BW', 'QW', 'KW', 'BW', 'NW', 'RW'],
     ['PW'] * 8,
@@ -215,6 +214,7 @@ BOARD_STD = [
 
 FILE_BASE = ord('a')
 OPPO = {'W': 'B', 'B': 'W'}
+SIDE_REPR = {'W': 'white', 'B': 'black', 'white': 'W', 'black': 'B'}
 DISPLAY = {
     'solid': {'R': '♜', 'N': '♞', 'B': '♝', 'Q': '♛', 'K': '♚', 'P': '♟',},
     'outline': {'R': '♖', 'N': '♘', 'B': '♗', 'Q': '♕', 'K': '♔', 'P': '♙',}
@@ -228,9 +228,11 @@ def mk_coords(square):
 
 def mk_square(*coords):
     # returns algebraic: [a..h][1..8] from board coords (0..7, 0..7)
+    assert 0 <= coords[0] <= 7 and 0 <= coords[1] <= 7, f"mk_square out-of-bounds: {coords}"
     return f"{chr(FILE_BASE+coords[0])}{coords[1]+1}"
 
 
+# piece movement destinations based on a set of x,y coordination deltas
 def dests_common(square, coord_alters):
     dests = set()
     start = mk_coords(square)
@@ -242,17 +244,28 @@ def dests_common(square, coord_alters):
     return dests
 
 
-def dests_radial(square, coord_alters):
+# piece movement destinations based on radial delta paths
+# e.g. queen moves along eight radial paths relative to current square
+def dests_radial(square, coord_alters, action, board):
     dests = set()
     start = mk_coords(square)
+    # x,y are the change at each step
     for x, y in coord_alters:
         keep_on = True
+        # starting point is current piece square
         new_file, new_rank = start[0], start[1]
+        # keep stepping along the radial until out-of-bounds
+        # we are not checking for piece collisions, as these are PGN playbacks
         while keep_on:
             new_file += x
             new_rank += y
             if 0 <= new_file <= 7 and 0 <= new_rank <= 7:
-                dests.add(mk_square(new_file, new_rank))
+                new_target = board.get_coords(file=new_file, rank=new_rank)
+                if ((action == 'move' and new_target is None) or
+                        action == 'capture'):
+                    dests.add(mk_square(new_file, new_rank))
+                else:
+                    keep_on = False
             else:
                 keep_on = False
 
@@ -272,54 +285,67 @@ def dests_king(square):
                          (-1, -1), (0, -1), (1, -1)))
 
 
-def dests_bishop(square):
+def dests_bishop(square, action, board):
     # Clockwise from 10:30
+    # if debug_this.now():
+    #     import pudb; pu.db
     return dests_radial(square,
                         ((-1, 1), (1, 1),
-                         (1, -1), (-1, -1)))
+                         (1, -1), (-1, -1)),
+                        action=action, board=board)
 
 
-def dests_rook(square):
+def dests_rook(square, action, board):
     # Clockwise from 9:00
     return dests_radial(square,
                         ((-1, 0), (0, 1),
-                         (1, 0), (0, -1)))
+                         (1, 0), (0, -1)),
+                        action=action, board=board)
 
 
-def dests_queen(square):
+def dests_queen(square, action, board):
+    # clockwise from 10:30
     return dests_radial(square,
                         ((-1, 1), (0, 1), (1, 1),
                          (-1, 0),         (1, 0),
-                         (-1, -1), (0, -1), (1, -1)))
+                         (-1, -1), (0, -1), (1, -1)),
+                        action=action, board=board)
 
 
-def dests_pawn(square, side):
+def dests_pawn(square, side, action):
     dests = set()
     start = mk_coords(square)
+    capture_dir = None
     if side == 'W':
-        # move
-        if start[1] == 1:
-            dests.add(mk_square(start[0], 2))
-            dests.add(mk_square(start[0], 3))
-        else:
-            dests.add(mk_square(start[0], start[1] + 1))
-        # capture
-        capture_dir = 1
+        if action == 'move':
+            # move
+            if start[1] == 1:
+                dests.add(mk_square(start[0], 2))
+                dests.add(mk_square(start[0], 3))
+            else:
+                dests.add(mk_square(start[0], start[1] + 1))
+        elif action == 'capture':
+            # capture
+            capture_dir = 1
     elif side == 'B':
-        # move
-        if start[1] == 6:
-            dests.add(mk_square(start[0], 5))
-            dests.add(mk_square(start[0], 4))
-        else:
-            dests.add(mk_square(start[0], start[1] - 1))
-        # capture
-        capture_dir = -1
+        if action == 'move':
+            # move
+            if start[1] == 6:
+                dests.add(mk_square(start[0], 5))
+                dests.add(mk_square(start[0], 4))
+            else:
+                dests.add(mk_square(start[0], start[1] - 1))
+        elif action == 'capture':
+            # capture
+            capture_dir = -1
     else:
         raise ValueError(f"Unexpected side: {side}")
 
-    for way in (-1, 1):
-        dests.add(mk_square(start[0] - way, start[1] + capture_dir))
-        dests.add(mk_square(start[0] + way, start[1] + capture_dir))
+    if action == 'capture':
+        if start[0] > 0:
+            dests.add(mk_square(start[0] - 1, start[1] + capture_dir))
+        if start[0] < 7:
+            dests.add(mk_square(start[0] + 1, start[1] + capture_dir))
 
     return dests
 
@@ -331,6 +357,9 @@ class Board:
 
     def get(self, square):
         return self.board[int(square[1])-1][ord(square[0])-FILE_BASE]
+
+    def get_coords(self, rank, file):
+        return self.board[rank][file]
 
     def set(self, square, piece=None, side=None):
         try:
@@ -355,10 +384,10 @@ class Board:
     def by_rank(self, rank, piece, side):
         ps = f"{piece}{side}"
         res = []
-        rank_no = int(rank)
+        rank_no = int(rank) - 1
         for file in FILE_CHARS:
-            if self.board[rank][rank_no] == ps:
-                res.append(f"{file}{rank+1}")
+            if self.board[rank_no][ord(file) - FILE_BASE] == ps:
+                res.append(f"{file}{rank_no+1}")
         return res
 
     def by_piece(self, piece, side):
@@ -370,21 +399,21 @@ class Board:
                     res.append(f"{chr(FILE_BASE+file)}{rank+1}")
         return res
 
-    def piece_dests(self, piece, start_square, side=None):
+    def piece_dests(self, piece, start_square, action=None, side=None, board=None):
+
         match piece[0]:
             case 'N':
                 return dests_knight(start_square)
             case 'B':
-                return dests_bishop(start_square)
+                return dests_bishop(start_square, action=action, board=board)
             case 'R':
-                return dests_rook(start_square)
+                return dests_rook(start_square, action=action, board=board)
             case 'P':
-                return dests_pawn(start_square, side=side)
+                return dests_pawn(start_square, action=action, side=side)
             case 'Q':
-                return dests_queen(start_square)
+                return dests_queen(start_square, action=action, board=board)
             case 'K':
                 return dests_king(start_square)
-
         raise ValueError(f"Unexpected piece type: {piece}, {side} {start_square}")
 
     def castle(self, m, side):
@@ -410,27 +439,42 @@ class Board:
     def move(self, m, side):
         points = 0
         old, new = None, None
-        # print(m)
-        if 'actor_file' in m:
-            squares = self.by_file(m['actor_file'], m['piece'], side)
+
+        if debug_this.now():
             import pudb; pu.db
+
+        if m['action'] == 'promote' and 'target' in m:
+            dests = self.by_file(m['target'][0], m['piece'], side)
+            # import pudb; pu.db
+            self.set(dests[0], piece=None)
+            self.set(m['target'], piece=m['replacement'], side=side)
+
+        elif 'actor_file' in m:
+            squares = self.by_file(m['actor_file'], m['piece'], side)
+
+            if m['action'] == 'promote':
+                if len(squares) != 1:
+                    import pudb; pu.db
 
             # Iterate current origin squares of matching pieces
             for piece_square in squares:
 
                 # Is the current move's destination in one of the piece's
                 # possible destinations?
-                if m['target'] in self.piece_dests(
-                        piece=m['piece'], start_square=piece_square, side=side):
+                dests = self.piece_dests(
+                        piece=m['piece'], start_square=piece_square,
+                        side=side, action=m['action'], board=self)
+
+                if m['action'] == 'promote':
+                    import pudb; pu.db
+                    old = piece_square
+                    new = dests[0]
+                    break
+                elif m['target'] in dests:
                     old = piece_square
                     new = m['target']
                     break
-            # if len(squares) != 1:
-            #     print(self)
-            #     import pudb; pu.db
-            #     raise ValueError(f"Multiple same piece type on file {m}")  # ['actor_file']
-            # old = squares[0]
-            # new = m['target']
+
         elif 'actor_rank' in m:
             squares = self.by_rank(m['actor_rank'], m['piece'], side)
             # Iterate current origin squares of matching pieces
@@ -439,20 +483,20 @@ class Board:
                 # Is the current move's destination in one of the piece's
                 # possible destinations?
                 if m['target'] in self.piece_dests(
-                        piece=m['piece'], start_square=piece_square, side=side):
+                        piece=m['piece'], start_square=piece_square,
+                        side=side, action=m['action'], board=self):
                     old = piece_square
                     new = m['target']
                     break
-            # if len(squares) != 1:
-            #     raise ValueError(f"Multiple same piece type on rank {m['actor_rank']} from {m}")
-            # old = squares[0]
-            # new = m['target']
+
         elif 'actor_square' in m:
             old = m['actor_square']
             new = m['target']
+
         elif m['piece'] == 'K' and m['target'][0] == 'O':
             self.castle(m, side=side)
             return 0
+
         else:
             # Locate the piece: we know its type, but its origin square,
             # rank or file wasn't mentioned in the algebraic.
@@ -471,8 +515,10 @@ class Board:
 
                 # Is the current move's destination in one of the piece's
                 # possible destinations?
-                if m['target'] in self.piece_dests(
-                        piece=m['piece'], start_square=piece_square, side=side):
+                dests = self.piece_dests(
+                        piece=m['piece'], start_square=piece_square,
+                        side=side, action=m['action'], board=self)
+                if m['target'] in dests:
                     old = piece_square
                     new = m['target']
                     break
@@ -484,8 +530,10 @@ class Board:
         if m['action'] == 'capture':
             points = POINTS[self.get(m['target'])[0]]
 
-        self.set(old, None)
-        self.set(new, m['piece'], side)
+        if m['action'] != 'promote':
+            self.set(old, None)
+            self.set(new, m['piece'], side)
+
         return points
 
     def __repr__(self):
@@ -507,13 +555,13 @@ class Board:
 
 
 def board(moves, graph):
-    ograph = dict()
     b = Board()
     points = dd(int)
     r = graph_root = graph
 
     for a_move in moves:
         if a_move:
+            debug_this.move_now = a_move['num']
             for move, side in ((a_move['white'], 'W'), (a_move['black'], 'B')):
                 if move:
                     mj = agn.parse(move[0]).unwrap()
@@ -521,13 +569,20 @@ def board(moves, graph):
                         mj = [mj]
                     for m in mj:
                         if args.show_board:
-                            print(sidemove := f"{a_move['num']}{side}. ",
+                            sidemove = f"{a_move['num']}{side}"
+                            print(f"{debug_this.game_now}:{sidemove}.",
+                                  a_move[SIDE_REPR[side]][0],
                                   json.dumps(m, sort_keys=True))
-                        points[side] += b.move(m, side)
+                        try:
+                            points[side] += b.move(m, side)
+                        except Exception as ee:
+                            import pudb; pu.db
+                            x = 1
+
                         if args.show_board:
                             print(b, "\n")
                             print(f"W:{points['W']}, B:{points['B']}")
-                            if input().lower() == 'q':
+                            if not debug_this and input().lower() == 'q':
                                 exit()
 
             try:
@@ -540,12 +595,13 @@ def board(moves, graph):
 
             if key in graph:
                 graph[key]['gcount'] += 1
+                graph = graph[key]
             else:
                 graph[key] = new_graph = dict(gcount=1)
-            graph = new_graph
+                graph = new_graph
             if args.show_board:
-                print(graph_root)
-                if input().lower() == 'q':
+                # print(graph_root)
+                if not debug_this and input().lower() == 'q':
                     exit()
 
     """
@@ -569,6 +625,7 @@ def handle_pgn(pgn, results: dict):
     if isinstance(result, Success):
         result = result.unwrap()[0]
         results['gcount'] += 1
+        print(f"Game #{debug_this.game_now}")
         board(result['game']['moves'], graph=results['ograph'])
         return
 
@@ -636,6 +693,7 @@ def process_games_single(pgn_parser: PGNStreamSlicer, pgn_limit: int):
     results = dict({
         "gcount": 0, "mcount": 0, "moves": dict(), "ograph": dict()})
     for pgn_num, pgn in enumerate(pgn_parser.next()):
+        debug_this.game_now = pgn_num
         handle_pgn(pgn, results)
         if pgn_limit and pgn_num > pgn_limit:
             break
@@ -708,9 +766,52 @@ def process_games_multi(pgn_parser: PGNStreamSlicer, process_count: int, pgn_lim
     return merged
 
 
+class GameDebug:
+    def __init__(self, debug_at_game_move_csv):
+        self._game_num, self._move_num = (
+            int(x) for x in debug_at_game_move_csv.split(","))
+        self._game_now = None
+        self._move_now = None
+
+    @property
+    def game_now(self):
+        return self._game_now
+
+    @game_now.setter
+    def game_now(self, game_now: int):
+        self._game_now = game_now
+
+    @property
+    def move_now(self):
+        return self._move_now
+
+    @move_now.setter
+    def move_now(self, move_now: int):
+        self._move_now = move_now
+
+    def now(self, margin=0):
+        # Have we reached the game and move # desired?
+        return ((self._game_num == self._game_now) and
+                (self._move_num <= self._move_now <= self._move_num +1))
+
+    def __repr__(self):
+        return (f"expected: {self._game_num},{self._move_num} " +
+                ("==" if self.now() else "!=") +
+                f" current: {self._game_now},{self._move_now}")
+
+
+debug_this: GameDebug = None
+
+
 def main(argv):
-    args, parser = get_args(argv)
+    global debug_this
+    args, args_parser = get_args(argv)
     parser = PGNStreamSlicer(pgn_path=args.pgn_path)
+    debug_this = None
+
+    if args.game_move_debug is not None:
+        debug_this = GameDebug(args.game_move_debug)
+
     if args.process_count > 1:
         move_stats = process_games_multi(parser, args.process_count, args.pgn_limit, args.queue_limit)
     else:
