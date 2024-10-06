@@ -12,14 +12,15 @@ from multiprocessing import Process, Queue
 import re
 import sys
 import time
-from typing import List, Tuple, Callable, Text, Dict
+from typing import List, Tuple, Callable, Text, Dict, Union
 
+from common import OPPO, PINS_RX
 from pgn_parser import pgn_file
 from move_parser import agn, FILE_CHARS
-from board_demo import prepare_board
 
-from colored import fore, back, style
+from colored import fore, back
 from parsita import Success
+import pudb
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -45,12 +46,21 @@ LINE_TYPE = {
 }
 
 
+PAWN_ACTION = {
+    'W': {'start': 1, 'first': [2, 3], 'advance': 1, 'capture': 1},
+    'B': {'start': 6, 'first': [5, 4], 'advance': -1, 'capture': -1}
+}
+EMPTY_PIN = tuple()
+
+
+
 class ArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         sys.stderr.write('error: %s\n' % message)
         self.print_help()
 
 
+args = None
 def get_args(argv: List[str]) -> Tuple[argparse.Namespace, ArgumentParser]:
     global args
     parser = ArgumentParser(
@@ -118,13 +128,9 @@ COLOR_SCHEMES = {
         'dark': 'dark_blue',
         'light': 'sky_blue_1',
     },
-    # '': {
-    #     'black': '',
-    #     'white': '',
-    #     'dark_space': '',
-    #     'light_space': '',
-    # },
 }
+COLOR_SCHEME_DEFAULT = 'blue_purple'
+PIECE_STYLE_DEFAULT = 'solid'
 
 SQUARE_COL = {0: 'light', 1: 'dark'}
 PIECE_COL = {'W': 'white', 'B': 'black'}
@@ -141,7 +147,7 @@ class PGNStreamSlicer:
         self.result = None
 
     def next(self):
-        # Saw off PGN hunks and hand them back to caller
+        # Saw off PGN hunks and yield them to caller
         buf = []
         this_type, prev_type = None, None
         keep_going = True
@@ -213,7 +219,6 @@ BOARD_STD = [
 
 
 FILE_BASE = ord('a')
-OPPO = {'W': 'B', 'B': 'W'}
 SIDE_REPR = {'W': 'white', 'B': 'black', 'white': 'W', 'black': 'B'}
 DISPLAY = {
     'solid': {'R': '♜', 'N': '♞', 'B': '♝', 'Q': '♛', 'K': '♚', 'P': '♟',},
@@ -250,68 +255,155 @@ def dests_common(square, coord_alters):
     return dests
 
 
-def dests_radial(piece, square, coord_alters, action, board, side):
-    # piece movement destinations based on radial delta paths
-    # e.g. queen moves along eight radial paths relative to current square
-    # Important: the in-memory board's origin is a1 aka board.board[0][0]
-    # which is the lower-left corner. coord_alters pairs are relative to this.
-    dests = set()
+BISHOP_DELTAS = (
+    (-1, 1), (1, 1),
+    (1, -1), (-1, -1))
+
+QUEEN_DELTAS = (
+    (-1, 1), (0, 1), (1, 1),
+    (-1, 0),           (1, 0),
+    (-1, -1), (0, -1), (1, -1))
+
+ROOK_DELTAS = (
+    (-1, 0), (0, 1),
+    (1, 0), (0, -1))
+
+
+def check_for_pin(piece, square, board, side):
+    """
+    This is a post-move check, determines whether a Q|R|B piece's new location
+    is pinning an opponent piece to the opponent king
+    """
+    if piece not in ('Q', 'R', 'B'):
+        return False
+
+    match piece:
+        case 'B':
+            deltas = BISHOP_DELTAS
+        case 'R':
+            deltas = ROOK_DELTAS
+        case 'Q':
+            deltas = QUEEN_DELTAS
+        case _:
+            return False
+
     start = mk_coords(square)
-    oking = mk_coords(board.by_piece('K', OPPO[side])[0])
-    # if debug_this.now():
-    #     import pudb; pu.db
-    kx, ky = start[0] - oking[0], start[1] - oking[1]
-    # x,y are the change at each step
-    once = False
-    for dx, dy in coord_alters:
-        # if (max(start[0], oking[0]) - min(start[0], oking[0]))
-        is_pin_line = (kx and kx/abs(kx) == dx
-                       and ky and ky/abs(ky) == dy and abs(kx) == abs(ky))
-        if debug_this.now():
-            if not once:
-                print(board)
-                print(square, side, action)
-                once = True
-            print(is_pin_line, kx, ky, dx, dy,
-                  kx/dx if dx else None,
-                  ky/dy if dy else None,
-                  kx/abs(kx) == dx if kx else None,
-                  ky/abs(ky) == dy if ky else None, "*"*50)
+    opking_sq = board.by_piece('K', OPPO[side])[0]
+    if not opking_sq:
+        return False
+    opking = mk_coords(opking_sq)
+    kdx, kdy = opking[0] - start[0], opking[1] - start[1]
+
+    for dx, dy in deltas:
         keep_on = True
+
+        # could this be a pin line?
+        is_pin_line = (
+            ((kdx == 0 and dx == 0) or (kdx and (kdx / abs(kdx))) == dx) and
+            ((kdy == 0 and dy == 0) or (kdy and (kdy / abs(kdy))) == dy))
+
+        if not is_pin_line:
+            continue
+
         # starting point is current piece square
         new_file, new_rank = start[0], start[1]
-        # keep stepping along the radial until out-of-bounds
-        # we are not checking for piece collisions, as these are PGN playbacks
+
+        pin_stripe = [board.get_coords(new_rank, new_file)]
+
+        pinned_piece = None
+        pinned_sq = None
+
+        # keep seaching along the radial until out-of-bounds
         while keep_on:
             new_file += dx
             new_rank += dy
-            if 0 <= new_file <= 7 and 0 <= new_rank <= 7:
-                new_target = board.get_coords(file=new_file, rank=new_rank)
-                if action == 'move':
-                    if new_target is None and not board.is_pinned(piece, square, side):
-                        dests.add(mk_square(new_file, new_rank))
-                    elif is_pin_line:
-                        board.set_pin(
-                            pinned_piece=new_target[0], side=OPPO[side],
-                            pinned_sq=mk_square(new_file, new_rank),
-                            pinning_piece=board.get(square)[0],
-                            pinning_sq=square,
-                            king_sq=mk_square(*oking)
-                        )
-                elif action == 'capture':
-                    if new_target:
-                        if new_target[1] == OPPO[side]:
-                            dests.add(mk_square(new_file, new_rank))
-                        else:
-                            keep_on = False
-                else:
-                    keep_on = False
-            else:
-                keep_on = False
 
-    if debug_this.now():
-        import pudb; pu.db
-    return dests
+            # If out-of-bounds this radial search ends here
+            if not (0 <= new_file <= 7 and 0 <= new_rank <= 7):
+                break
+
+            # get text representation of piece at new square
+            piece_at = board.get_coords(file=new_file, rank=new_rank)
+            if piece_at:
+                if piece_at[1] == OPPO[side]:
+                    if not pinned_piece:
+                        pinned_piece = piece_at
+                        pinned_sq = mk_square(new_file, new_rank)
+                    elif piece_at[0] == 'K':
+                        # two opponent pieces on this line: no pin
+                        keep_on = False
+                    else:
+                        is_pin_line = False
+                        keep_on = False
+
+
+            pin_stripe.append(piece_at or "  ")
+
+        if is_pin_line and pin_stripe and pinned_piece:
+            # is opponent's king pinned?
+            if re.match(PINS_RX[side], "".join(pin_stripe)):
+                board.add_pin(pinned_piece,
+                              pinned_sq,
+                              f"{piece}{side}",  # pinning piece
+                              square,            # pinning square
+                              opking_sq)         # opponent king square
+                return True
+
+    return False
+
+
+def dests_radial(piece, square, radial_deltas, action, board, side):
+    # TODO: combine this with check_for_pin, or at least seed it with the
+    # deltas that align with the king
+    """
+    piece movement destinations based on radial delta paths
+    e.g. queen moves along eight radial paths relative to current square
+    Important: the in-memory board's origin is a1 aka board.board[0][0]
+    which is the lower-left corner. coord_alters pairs are relative to this.
+    """
+    moves = set()
+
+    start = mk_coords(square)
+    opking = mk_coords(board.by_piece('K', OPPO[side])[0])
+
+    kdx, kdy = start[0] - opking[0], start[1] - opking[1]
+
+    # dx,dy is the change at each step of the radial
+    for dx, dy in radial_deltas:
+        keep_on = True
+
+        # starting point is current piece square
+        new_file, new_rank = start[0], start[1]
+
+        # keep seaching along the radial until out-of-bounds
+        while keep_on:
+            new_file += dx
+            new_rank += dy
+
+            # out-of-bounds ends this radial search
+            if not (0 <= new_file <= 7 and 0 <= new_rank <= 7):
+                break
+
+            # get text representation of piece at new square
+            piece_at = board.get_coords(file=new_file, rank=new_rank)
+            # if is_pin_line:
+            #     pin_stripe.append(piece_at or "  ")
+
+            if action == 'capture':
+                if piece_at:
+                    if piece_at[1] == OPPO[side]:
+                        moves.add(mk_square(new_file, new_rank))
+                    # either way, either side, this radial ends here
+                    keep_on = False
+
+            elif action == 'move':
+                if not piece_at:
+                    moves.add(mk_square(new_file, new_rank))
+                else:
+                    # piece collision ends this radial, either side
+                    keep_on = False
+
+    return moves
 
 
 def dests_knight(square):
@@ -323,90 +415,67 @@ def dests_knight(square):
 def dests_king(square):
     return dests_common(square,
                         ((-1, 1,), (0, 1), (1, 1),
-                         (-1, 0), (1, 0),
+                         (-1, 0),           (1, 0),
                          (-1, -1), (0, -1), (1, -1)))
 
 
 def dests_bishop(square, action, board, side):
     # Clockwise from 10:30
-    # if debug_this.now():
-    #     import pudb; pu.db
-    return dests_radial("B", square,
-                        ((-1, 1), (1, 1),
-                         (1, -1), (-1, -1)),
+    return dests_radial("B", square, BISHOP_DELTAS,
                         action=action, board=board, side=side)
 
 
 def dests_rook(square, action, board, side):
     # Clockwise from 9:00
-    return dests_radial("R", square,
-                        ((-1, 0), (0, 1),
-                         (1, 0), (0, -1)),
+    return dests_radial("R", square, ROOK_DELTAS,
                         action=action, board=board, side=side)
-
 
 def dests_queen(square, action, board, side):
     # clockwise from 10:30
-    return dests_radial("Q", square,
-                        ((-1, 1), (0, 1), (1, 1),
-                         (-1, 0),         (1, 0),
-                         (-1, -1), (0, -1), (1, -1)),
+    return dests_radial("Q", square, QUEEN_DELTAS,
                         action=action, board=board, side=side)
 
 
 def dests_pawn(square, side, action, board=None, target=None):
     dests = set()
     start = mk_coords(square)
+
     capture_dir = None
-    if side == 'W':
-        if action == 'move':
-            # move
-            if start[1] == 1:
-                if not board.get(tsq := mk_square(start[0], 2)):
+    act = PAWN_ACTION[side]
+    if action == 'move':
+        # move
+        if start[1] == act['start']:
+            if not board.get(tsq := mk_square(start[0], act['first'][0])):
+                dests.add(tsq)
+                if not board.get(tsq := mk_square(start[0], act['first'][1])):
                     dests.add(tsq)
-                    if not board.get(tsq := mk_square(start[0], 3)):
-                        dests.add(tsq)
-            else:
-                if not board.get(tsq := mk_square(start[0], start[1] + 1)):
-                    dests.add(tsq)
-        elif action == 'capture':
-            # capture
-            capture_dir = 1
-    elif side == 'B':
-        if action == 'move':
-            # move
-            if start[1] == 6:
-                if not board.get(tsq := mk_square(start[0], 5)):
-                    dests.add(tsq)
-                    if not board.get(tsq := mk_square(start[0], 4)):
-                        dests.add(tsq)
-            else:
-                if not board.get(tsq := mk_square(start[0], start[1] - 1)):
-                    dests.add(tsq)
-        elif action == 'capture':
-            # capture
-            capture_dir = -1
-    else:
-        raise ValueError(f"Unexpected side: {side}")
+        else:
+            if not board.get(tsq := mk_square(start[0], start[1] + act['advance'])):
+                dests.add(tsq)
 
     if action == 'capture':
         if start[0] > 0:
-            if board.get(tsq := mk_square(start[0] - 1, start[1] + capture_dir)):
+            if board.get(tsq := mk_square(start[0] - 1, start[1] + act['capture'])):
                 dests.add(tsq)
         if start[0] < 7:
-            if board.get(tsq := mk_square(start[0] + 1, start[1] + capture_dir)):
+            if board.get(tsq := mk_square(start[0] + 1, start[1] + act['capture'])):
                 dests.add(tsq)
 
     return dests
 
 
 class Board:
-    def __init__(self):
-        self.board = copy.deepcopy(BOARD_STD)
+    def __init__(self, empty=False):
         self._pieces = dd(set)
-        self._populate_pieces()
+        if not empty:
+            self.board = copy.deepcopy(BOARD_STD)
+            self._populate_pieces()
+        else:
+            self.board = [[None] * 8 for _ in range(8)]
         self._pinned = dict()
         self._pinner = dict()
+        self._king_pin = dict()
+        # self._pinner = dict()
         # self._gui_board, self._gui_board_window = prepare_board()
 
     def _populate_pieces(self):
@@ -414,7 +483,86 @@ class Board:
             for file in range(8):
                 piece = self.board[rank][file]
                 if piece:
-                    self._pieces[piece].add(mk_square(file, rank))
+                    self.add(piece, mk_square(file, rank))
+
+    def add(self, piece, square):
+        self._pieces[piece].add(square)
+        coords = mk_coords(square)
+        self.board[coords[1]][coords[0]] = piece
+
+    def add_pin(self, pinned_piece, pinned_sq, pinning_piece, pinning_sq, king_sq):
+        self._pinned[pinned_piece, pinned_sq] = (pinning_piece, pinning_sq, king_sq)
+        self._pinner[pinning_piece, pinning_sq] = (pinned_piece, pinned_sq, king_sq)
+        self._king_pin[king_sq] = (pinned_piece, pinned_sq, pinning_piece, pinning_sq)
+
+    def is_pinned(self, piece, side, square):
+        return self._pinned.get((f"{piece}{side}", square), None)
+
+    def resolve_pins(self, from_sq, from_piece, to_sq, to_piece, is_capture):
+        """
+        If from_piece/sq is pinning another piece-
+          - remove from self._pinner
+          - remove the pinned piece from self._pinned
+          - remove self._king_pin
+        If from_piece/sq is pinned by another piece-
+          - If the pinner still pinning, error
+          - If the pinner is not pinning bc not on board, error
+`          - Else, remove from self._pinned
+        If to_piece/sq is pinning another piece and it's a capture-
+          - remove to_piece/sq from self._pinner
+          - remove its pinned piece
+          - remove self._king_pin
+        If to_piece/sq is pinning another piece and it's not a capture, error?
+        If to_piece/sq is pinned by another piece-
+          - remove to_piece/sq from self._pinned
+        """
+        try:
+            if from_piece[0] == 'K' and (kingpin := self._king_pin.get(from_sq, EMPTY_PIN)):
+                if self.get(from_sq) == from_piece:
+                    raise ValueError(f"King {from_piece} at {from_sq} "
+                                     f"is still pinning {kingpin}")
+                pinned_piece, pinned_sq, pinning_piece, pinning_sq = kingpin
+                del self._pinned[pinned_piece, pinned_sq]
+                del self._pinner[pinning_piece, pinning_sq]
+                del self._king_pin[from_sq]
+                return
+            elif pinned := self._pinner.get((from_piece, from_sq), EMPTY_PIN):
+                if pinned[0] is None or pinned[1] is None:
+                    pu.db
+                # Is the pinner still pinning?
+                if self.get(from_sq) == from_piece:
+                    raise ValueError(f"Piece {from_piece} at {from_sq} "
+                                     f"is still pinning {pinned}")
+                del self._pinned[pinned[0], pinned[1]]
+                del self._pinner[from_piece, from_sq]
+                del self._king_pin[pinned[2]]
+                return
+
+            elif pinner := self._pinned.get((from_piece, from_sq), EMPTY_PIN):
+                pinner_piece, pinner_sq, king_sq = pinner
+                if self.get(pinner_sq) == pinner_piece:
+                    raise ValueError(f"Piece {from_piece} at {from_sq} is pinned by {pinner}")
+                del self._pinned[from_piece, from_sq]
+                del self._pinner[pinner_piece, pinner_sq]
+                del self._king_pin[king_sq]
+
+            if is_capture:
+                if pinner := self._pinned.get((to_piece, to_sq), EMPTY_PIN):
+                    pinner_piece, pinner_sq, king_sq = pinner
+                    del self._pinned[to_piece, to_sq]
+                    del self._pinner[pinner_piece, pinner_sq]
+                    del self._king_pin[king_sq]
+                elif pinned := self._pinner.get((to_piece, to_sq), EMPTY_PIN):
+                    pinned_piece, pinned_sq, king_sq = pinned
+                    del self._pinner[to_piece, to_sq]
+                    del self._pinned[pinned_piece, pinned_sq]
+                    del self._king_pin[king_sq]
+
+        except Exception as eee:
+            import traceback as tb
+            print(tb.format_exc())
+            import pudb; pu.db
+            x = 1
 
     def reposition(self, from_sq, to_sq, is_capture=False):
         try:
@@ -433,10 +581,12 @@ class Board:
             new_coords = mk_coords(to_sq)
             self.board[old_coords[1]][old_coords[0]] = None
             self.board[new_coords[1]][new_coords[0]] = from_piece
-            if self.is_pinner(from_piece[0], from_piece[1], from_sq):
-                self.del_pin(from_piece[0], from_sq, from_piece[1])
+            self.resolve_pins(from_sq, from_piece, to_sq, to_piece, is_capture)
+            check_for_pin(from_piece[0], to_sq, self, from_piece[1])
 
         except Exception as ee:
+            import traceback as tb
+            print(tb.format_exc())
             import pudb; pu.db
             x = 1
 
@@ -446,7 +596,7 @@ class Board:
                 self._gui_board.psg_board[rank][file] = PSG[self.get_coords(rank, file)]
         self._gui_board.redraw_board(self._gui_board_window)
 
-    def get(self, square):
+    def get(self, square) -> Union[str|None]:
         return self.board[int(square[1])-1][ord(square[0])-FILE_BASE]
 
     def get_coords(self, rank, file):
@@ -459,35 +609,6 @@ class Board:
             print(self)
             import pudb; pu.db
             x = 1
-
-    def set_pin(self, pinned_piece, side, pinned_sq, pinning_piece, pinning_sq, king_sq):
-        self._pinned[f"{pinned_piece}{side}"] = {
-            'pinned_sq': pinned_sq,
-            'pinning_piece': pinning_piece,
-            'pinning_sq': pinning_sq,
-            'king_sq': king_sq,
-            'side': side,
-        }
-        self._pinner[f"{pinning_piece}{side}"] = {
-            'pinned_sq': pinned_sq,
-            'pinning_piece': pinning_piece,
-            'pinning_sq': pinning_sq,
-            'king_sq': king_sq,
-            'side': side,
-        }
-
-    def unset_pin(self, pinned_piece, square, side):
-        pin = f"{pinned_piece}{side}"
-        if pin in self._pinned and self._pinned[pin]['pinned_sq'] == square:
-            del self._pinned[pin]
-
-    def is_pinned(self, piece, side, square):
-        pin = f"{piece}{side}"
-        return pin in self._pinned and self._pinned[pin]['pinned_sq'] == square
-
-    def is_pinner(self, piece, side, square):
-        pin = f"{piece}{side}"
-        return pin in self._pinner and self._pinner[pin]['pinning_sq'] == square
 
     def by_file(self, file, piece, side):
         ps = f"{piece}{side}"
@@ -554,18 +675,14 @@ class Board:
             raise ValueError(f"Attempted castling but no joy: {m}")
         self.reposition(king_origin, king_dest)
         self.reposition(rook_origin, rook_dest)
-        # self.set(king_origin, None)
-        # self.set(rook_origin, None)
-        # self.set(king_dest, 'K', side=side)
-        # self.set(rook_dest, 'R', side=side)
 
     def move(self, m, side):
         global en_passant
         points = 0
         old, new = None, None
 
-        if debug_this.now():
-            import pudb; pu.db
+        if debug_this and debug_this.now():
+            pu.db
 
         if (m['action'] == 'capture' and m['piece'] == 'P'
                 and not self.get(m['target'])):
@@ -581,18 +698,22 @@ class Board:
 
         elif m['action'] == 'promote' and 'target' in m:
             dests = self.by_file(m['target'][0], m['piece'], side)
-            # import pudb; pu.db
             self.set(dests[0], piece=None)
             self.set(m['target'], piece=m['replacement'], side=side)
             self._pieces[f"{m['piece']}{side}"].remove(dests[0])
             self._pieces[f"{m['replacement']}{side}"].add(m['target'])
+
+            # We set old and new to avoid error at this method's end action,
+            # because action == 'promote' is ignored
+            old = dests[0]
+            new = m['target']
 
         elif 'actor_file' in m:
             squares = self.by_file(m['actor_file'], m['piece'], side)
 
             if m['action'] == 'promote':
                 if len(squares) != 1:
-                    import pudb; pu.db
+                    pu.db
 
             # Iterate current origin squares of matching pieces
             for piece_square in squares:
@@ -604,14 +725,26 @@ class Board:
                         side=side, action=m['action'], board=self)
 
                 if m['action'] == 'promote':
-                    import pudb; pu.db
+                    pu.db
                     old = piece_square
                     new = dests[0]
                     break
                 elif m['target'] in dests:
+                    if pinfo := self.is_pinned(m['piece'], side, piece_square):
+                        if m['action'] != 'capture':
+                            continue
+                        if pinfo[1] != m['target']:
+                            continue
+                        # pu.db
+                        cap_target = self.get(m['target'])
+                        # if cap_target == pinfo[0]:
+                        #     points += POINTS[cap_target[0]]
                     old = piece_square
                     new = m['target']
                     break
+            if old is None or new is None:
+                pu.db
+                x = 1
 
         elif 'actor_rank' in m:
             squares = self.by_rank(m['actor_rank'], m['piece'], side)
@@ -623,11 +756,15 @@ class Board:
                 if m['target'] in self.piece_dests(
                         piece=m['piece'], start_square=piece_square,
                         side=side, action=m['action'], board=self):
-                    old = piece_square
-                    new = m['target']
-                    break
+                    if not self.is_pinned(m['piece'], side, piece_square):
+                        old = piece_square
+                        new = m['target']
+                        break
+            if old is None or new is None:
+                pu.db
+                raise ValueError(f"Moving piece isn't found: {m}")
 
-        elif 'actor_square' in m:
+        elif 'actor_square' in m and not self.is_pinned(m['piece'], side, m['actor_square']):
             old = m['actor_square']
             new = m['target']
 
@@ -649,7 +786,7 @@ class Board:
                 raise ValueError(f"No pieces of type {m} on board")
 
             # Iterate current origin squares of matching pieces
-            for piece_square in squares:
+            for idx, piece_square in enumerate(squares):
 
                 # Is the current move's destination in one of the piece's
                 # possible destinations?
@@ -660,14 +797,23 @@ class Board:
                     piece=m['piece'], start_square=piece_square,
                     side=side, action=m['action'], board=self,
                     target=m['target'])
+
                 if m['target'] in dests and not self.is_pinned(m['piece'], side, piece_square):
                     old = piece_square
                     new = m['target']
                     break
+                elif self.is_pinned(m['piece'], side, piece_square):
+                    pu.db
+                    y = 1
 
             if old is None or new is None:
-                import pudb; pu.db
-                raise ValueError(f"Moving piece isn't found: {m}")
+                pu.db
+                x = 1
+
+        if old is None or new is None:
+            print(self)
+            pu.db
+            raise ValueError(f"Moving piece isn't found: {m}")
 
         if m['action'] == 'capture':
             cap_target = self.get(m['target'])
@@ -675,30 +821,35 @@ class Board:
 
         if m['action'] != 'promote':
             self.reposition(old, new, is_capture=m['action'] == 'capture')
-            # self.set(old, None)
-            # self.set(new, m['piece'], side)
 
         return points
 
     def __repr__(self):
         res = []
-        cols = COLOR_SCHEMES[args.colors]
+        scheme = args.colors if args else COLOR_SCHEME_DEFAULT
+        colors = COLOR_SCHEMES[scheme] if scheme != 'none' else None
+        style = args.piece_style if args else PIECE_STYLE_DEFAULT
         for rank in range(7, -1, -1):
             row = []
             for file in range(8):
                 sq_col = int(not((rank + file) % 2))
                 piece = self.board[rank][file]
-                row.append(
-                    f"{back(cols[SQUARE_COL[sq_col]])}"
-                    f"{fore(cols[PIECE_COL[piece[1] if piece else 'B']])}"
-                    f"{DISPLAY[args.piece_style][piece[0]] if piece else ' ':1s}")
+                if colors:
+                    row.append(
+                        f"{back(colors[SQUARE_COL[sq_col]])}"
+                        f"{fore(colors[PIECE_COL[piece[1] if piece else 'B']])}"
+                        f"{DISPLAY[style][piece[0]] if piece else ' ':1s}")
+                else:
+                    row.append(
+                        f"{DISPLAY[style][piece[0]] if piece else ' ':1s}")
                 sq_col = int(not(sq_col))
-            row.append(f"{back('black')}{fore('white')}")
+            if colors:
+                row.append(f"{back('black')}{fore('white')}")
             res.append(" ".join(row))
         return "\n".join(res)
 
 
-def board(moves, graph):
+def run_game(moves, graph):
     global en_passant
     b = Board()
     points = dd(int)
@@ -728,10 +879,8 @@ def board(moves, graph):
                             import pudb; pu.db
                             x = 1
 
-                        if args.show_board and (
-                            debug_this.in_game() or
-                            debug_this.game_now >= debug_this._game_num):
-                        # if args.show_board:  # and debug_this.in_game():
+                        if args.show_board and debug_this.in_game(True):
+                            # if args.show_board:  # and debug_this.in_game():
                             print(b, "\n")
                         print(f"W:{points['W']}, B:{points['B']}")
                             # b.redraw_gui_board()
@@ -752,25 +901,6 @@ def board(moves, graph):
             else:
                 graph[key] = new_graph = dict(gcount=1)
                 graph = new_graph
-            # if args.show_board:
-                # print(graph_root)
-                # if debug_this._game_num is None and input().lower() == 'q':
-                #     exit()
-
-    """
-    if move[0] in ograph:
-        ograph[move[0]]['freq'] += 1
-    else:
-        ograph[move[0]] = {
-            'freq': 1,
-        }
-    if mj['action'] == 'capture':
-        import pudb;
-        pu.db
-        ograph[move[0]]['point'] = capture_points(mj)
-
-    ograph[a_move['white'][0]] = a_move['white'][1]
-    """
 
 
 def handle_pgn(pgn, results: dict):
@@ -778,32 +908,7 @@ def handle_pgn(pgn, results: dict):
     if isinstance(result, Success):
         result = result.unwrap()[0]
         results['gcount'] += 1
-        board(result['game']['moves'], graph=results['ograph'])
-        return
-
-        for num, a_move in enumerate(result['game']['moves']):
-            try:
-                if a_move:
-                    results['mcount'] += 1
-                    print("a_move['white']", a_move['white'])
-                    results['ograph'][a_move['white'][0]] = a_move['white'][1]
-                    if a_move['white']:
-                        if a_move['white'][0] in results["moves"]:
-                            results["moves"][a_move['white'][0]] += 1
-                        else:
-                            results["moves"][a_move['white'][0]] = 1
-                    else:
-                        logger.error("empty white move! at {num} in {pgn}")
-                    if a_move['black']:
-                        if a_move['black'][0] in results["moves"]:
-                            results["moves"][a_move['black'][0]] += 1
-                        else:
-                            results["moves"][a_move['black'][0]] = 1
-                else:
-                    logger.error("empty move! at {num} in {pgn}")
-            except Exception as e:
-                logger.exception(
-                    "Exception whilst combining moves: %s", a_move, e)
+        run_game(result['game']['moves'], graph=results['ograph'])
     else:
         logger.error(f"Error parsing PGN: {pgn}")
         logger.error(result)
@@ -952,8 +1057,14 @@ class GameDebug:
                 self._game_num == self._game_now and
                 self._move_num <= self._move_now <= self._move_num +1)
 
-    def in_game(self):
-        return self._game_num is not None and self._game_num == self._game_now
+    def in_game(self, gt=None):
+        return ((self._game_num is not None and
+                 self._game_num == self._game_now) or (
+                        gt is not None and
+                        self._game_num is not None and
+                        self._game_now >= self._game_num)
+        )
+
 
     def in_use(self):
         return self._game_num is not None
@@ -980,7 +1091,6 @@ def main(argv):
     else:
         move_stats = process_games_single(parser, args.pgn_limit)
 
-    """
     with open(args.out_path, "w") as f:
         f.write(json.dumps({
             "game_count": move_stats['gcount'],
@@ -988,7 +1098,6 @@ def main(argv):
             "moves": sorted(move_stats['moves'].keys()),
             "stats": {k: v for k, v in move_stats.items()},
         })+"\n\n")
-    """
 
 
 if __name__ == "__main__":
