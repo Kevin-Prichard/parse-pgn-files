@@ -1,2 +1,4 @@
 colored
 parsita
+pytest
+python-box
