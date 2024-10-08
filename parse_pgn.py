@@ -18,6 +18,7 @@ from common import OPPO, PINS_RX
 from pgn_parser import pgn_file
 from move_parser import agn, FILE_CHARS
 
+from box import Box
 from colored import fore, back
 from parsita import Success
 import pudb
@@ -269,14 +270,11 @@ ROOK_DELTAS = (
     (1, 0), (0, -1))
 
 
-def check_for_pin(piece, square, board, side):
+def check_for_pin(piece, square, board, side, return_pin=False):
     """
     This is a post-move check, determines whether a Q|R|B piece's new location
     is pinning an opponent piece to the opponent king
     """
-    if piece not in ('Q', 'R', 'B'):
-        return False
-
     match piece:
         case 'B':
             deltas = BISHOP_DELTAS
@@ -308,7 +306,9 @@ def check_for_pin(piece, square, board, side):
         # starting point is current piece square
         new_file, new_rank = start[0], start[1]
 
-        pin_stripe = [board.get_coords(new_rank, new_file)]
+        pin_stripe = [piece_at := board.get_coords(new_rank, new_file) or "  "]
+        # if piece_at is None:
+        #     pu.db
 
         pinned_piece = None
         pinned_sq = None
@@ -341,15 +341,33 @@ def check_for_pin(piece, square, board, side):
 
         if is_pin_line and pin_stripe and pinned_piece:
             # is opponent's king pinned?
-            if re.match(PINS_RX[side], "".join(pin_stripe)):
-                board.add_pin(pinned_piece,
-                              pinned_sq,
-                              f"{piece}{side}",  # pinning piece
-                              square,            # pinning square
-                              opking_sq)         # opponent king square
-                return True
+            try:
+                if re.match(PINS_RX[side], "".join(pin_stripe)):
+                    print(f"PIN FOUND: {piece}{side} at {square} pins "
+                          f"{pinned_piece} at {pinned_sq} to {opking_sq}")
+                    if return_pin:
+                        return pinned_piece, pinned_sq, opking_sq
+                    board.add_pin(pinned_piece,
+                                  pinned_sq,
+                                  f"{piece}{side}",  # pinning piece
+                                  square,            # pinning square
+                                  opking_sq)         # opponent king square
+                    return True
+            except Exception as ee:
+                import traceback as tb
+                print(tb.format_exc())
+                print(f"Error: {ee}")
+                pu.db
+                x = 1
 
     return False
+
+
+def check_for_king_pin(board: 'Board', side):
+    # Check oppo's sliders for pinning side's king
+    for piece_type in "QRB":
+        for square in board.by_piece(piece_type, OPPO[side]):
+            check_for_pin(piece_type, square, board, OPPO[side])
 
 
 def dests_radial(piece, square, radial_deltas, action, board, side):
@@ -495,8 +513,33 @@ class Board:
         self._pinner[pinning_piece, pinning_sq] = (pinned_piece, pinned_sq, king_sq)
         self._king_pin[king_sq] = (pinned_piece, pinned_sq, pinning_piece, pinning_sq)
 
-    def is_pinned(self, piece, side, square):
+    def is_pinned(self, piece, side, square) -> [None, Tuple[str, str, str]]:
         return self._pinned.get((f"{piece}{side}", square), None)
+
+    def review_pins(self):
+        tasks = []
+        # Review pinners to see if they are still pinning
+        for pinner, pinfo in self._pinner.items():
+            # If a remembered pinner isn't pinning, queue to remove the pin
+            if not check_for_pin(pinner[0][0], pinner[1], self,
+                                 pinner[0][1], return_pin=True):
+                tasks.append((pinner, pinfo))
+
+        # Must defer removal of pins until all pins have been reviewed,
+        # because that would interrupt iteration of dict self._pinner
+        for pinner, pinfo in tasks:
+            try:
+                if debug_this and debug_this.now():
+                    pu.db
+                print(f"PIN REMOVED*** {pinner[0]} at {pinner[1]} pins "
+                      f"{pinfo[0]} at {pinfo[1]} to {pinfo[2]}")
+                del self._pinner[pinner]
+                del self._pinned[pinfo[:2]]
+                if
+                del self._king_pin[pinfo[2]]
+            except Exception as ee:
+                pu.db
+                x = 1
 
     def resolve_pins(self, from_sq, from_piece, to_sq, to_piece, is_capture):
         """
@@ -516,47 +559,91 @@ class Board:
         If to_piece/sq is pinned by another piece-
           - remove to_piece/sq from self._pinned
         """
+        pins_to_check = set()
         try:
-            if from_piece[0] == 'K' and (kingpin := self._king_pin.get(from_sq, EMPTY_PIN)):
-                if self.get(from_sq) == from_piece:
-                    raise ValueError(f"King {from_piece} at {from_sq} "
-                                     f"is still pinning {kingpin}")
-                pinned_piece, pinned_sq, pinning_piece, pinning_sq = kingpin
-                del self._pinned[pinned_piece, pinned_sq]
-                del self._pinner[pinning_piece, pinning_sq]
-                del self._king_pin[from_sq]
-                return
-            elif pinned := self._pinner.get((from_piece, from_sq), EMPTY_PIN):
-                if pinned[0] is None or pinned[1] is None:
-                    pu.db
-                # Is the pinner still pinning?
-                if self.get(from_sq) == from_piece:
-                    raise ValueError(f"Piece {from_piece} at {from_sq} "
-                                     f"is still pinning {pinned}")
-                del self._pinned[pinned[0], pinned[1]]
-                del self._pinner[from_piece, from_sq]
-                del self._king_pin[pinned[2]]
-                return
+            if not is_capture:
+                # Is this a king, and is a piece pinned to it?
+                if from_piece[0] == 'K' and (kingpin := self._king_pin.get(from_sq, EMPTY_PIN)):
+                    # TODO how is this possible?  The from_piece didn't move???
+                    if self.get(from_sq) == from_piece:
+                        pu.db
+                        raise ValueError(f"King {from_piece} at {from_sq} "
+                                         f"is still pinning {kingpin}")
 
-            elif pinner := self._pinned.get((from_piece, from_sq), EMPTY_PIN):
-                pinner_piece, pinner_sq, king_sq = pinner
-                if self.get(pinner_sq) == pinner_piece:
-                    raise ValueError(f"Piece {from_piece} at {from_sq} is pinned by {pinner}")
-                del self._pinned[from_piece, from_sq]
-                del self._pinner[pinner_piece, pinner_sq]
-                del self._king_pin[king_sq]
+                    pinned_piece, pinned_sq, pinning_piece, pinning_sq = kingpin
 
-            if is_capture:
+                    del self._pinned[pinned_piece, pinned_sq]
+                    del self._pinner[pinning_piece, pinning_sq]
+                    del self._king_pin[from_sq]
+                    pins_to_check.add((from_piece, to_sq))
+                    print(f"King pin resolved A: \nKing: {from_sq}\n"
+                          f"Pinned: {pinned_piece} at {pinned_sq}\n"
+                          f"Pinning: {pinning_piece} at {pinning_sq}")
+
+                # Was the from_piece/sq pinning another piece?
+                elif pinned := self._pinner.get((from_piece, from_sq), EMPTY_PIN):
+                    if pinned[0] is None or pinned[1] is None:
+                        pu.db
+                    # TODO is this even possible?  Pinner hadn't moved???
+                    if self.get(from_sq) == from_piece:
+                        pu.db
+                        raise ValueError(f"Piece {from_piece} at {from_sq} "
+                                         f"is still pinning {pinned}")
+
+                    del self._pinned[pinned[0], pinned[1]]
+                    del self._pinner[from_piece, from_sq]
+                    del self._king_pin[pinned[2]]
+                    pins_to_check.add((from_piece, to_sq))
+                    print(f"King pin resolved B: \nKing: {from_sq}\n"
+                          f"Pinned: {pinned[0]} at {pinned[1]}\n"
+                          f"Pinning: {from_piece} at {from_sq}")
+
+                # was from_piece/sq pinned by another piece?
+                elif pinner := self._pinned.get((from_piece, from_sq), EMPTY_PIN):
+                    pinner_piece, pinner_sq, king_sq = pinner
+                    # TODO how would this not be the case?
+                    if self.get(pinner_sq) == pinner_piece:
+                         if pin_res := check_for_pin(pinner_piece[0], pinner_sq,
+                                self, from_piece[1], return_pin=True):
+                            pinned_piece2, pinned_sq2 = pin_res
+                            if not (pinned_piece2 == from_piece and pinned_sq2 == to_sq):
+                                raise ValueError(f"Piece {from_piece} at {to_sq} isn't pinned by {pinner} ???")
+
+                    if king_sq not in self._king_pin:
+                        pu.db
+                    del self._pinned[from_piece, from_sq]
+                    del self._pinner[pinner_piece, pinner_sq]
+                    del self._king_pin[king_sq]
+                    pins_to_check.add((from_piece, to_sq))
+                    pins_to_check.add((pinner_piece, pinner_sq))
+                    print(f"King pin resolved C: {king_sq}\n"
+                          f"Pinned: {from_piece} at {from_sq}\n"
+                          f"Pinning: {pinner_piece} at {pinner_sq}")
+
+            else:
+                # Capturing to_piece/sq, was it pinned by another piece?
                 if pinner := self._pinned.get((to_piece, to_sq), EMPTY_PIN):
                     pinner_piece, pinner_sq, king_sq = pinner
                     del self._pinned[to_piece, to_sq]
                     del self._pinner[pinner_piece, pinner_sq]
                     del self._king_pin[king_sq]
+                    pins_to_check.add((pinner_piece, pinner_sq))
+                    pins_to_check.add((from_piece, to_sq))
+                    print(f"King pin resolved D1: {king_sq}\n"
+                          f"Pinned: {to_piece} at {to_sq}\n"
+                          f"Pinning: {pinner_piece} at {pinner_sq}")
+
+                # Capturing a pinner, was it pinning another piece?
                 elif pinned := self._pinner.get((to_piece, to_sq), EMPTY_PIN):
                     pinned_piece, pinned_sq, king_sq = pinned
                     del self._pinner[to_piece, to_sq]
                     del self._pinned[pinned_piece, pinned_sq]
                     del self._king_pin[king_sq]
+                    print(f"King pin resolved D2: {king_sq}\n"
+                          f"Pinned: {pinned_piece} at {to_sq}\n"
+                          f"Pinning: {from_piece} at {from_sq}")
+
+            return pins_to_check
 
         except Exception as eee:
             import traceback as tb
@@ -581,8 +668,18 @@ class Board:
             new_coords = mk_coords(to_sq)
             self.board[old_coords[1]][old_coords[0]] = None
             self.board[new_coords[1]][new_coords[0]] = from_piece
-            self.resolve_pins(from_sq, from_piece, to_sq, to_piece, is_capture)
-            check_for_pin(from_piece[0], to_sq, self, from_piece[1])
+
+            # self.resolve_pins(from_sq, from_piece, to_sq, to_piece, is_capture)
+            if self._pinned:
+                self.review_pins()
+            if from_piece[0] in "QRB":
+                check_for_pin(from_piece[0], to_sq, self, from_piece[1])
+            elif from_piece[0] == 'K':
+                check_for_king_pin(self, from_piece[1])
+            if self._pinned or self._pinner or self._king_pin:
+                print(f"*Pinners: {self._pinner}\n"
+                      f"*Pinned: {self._pinned}\n"
+                      f"*King pin: {self._king_pin}")
 
         except Exception as ee:
             import traceback as tb
@@ -681,9 +778,6 @@ class Board:
         points = 0
         old, new = None, None
 
-        if debug_this and debug_this.now():
-            pu.db
-
         if (m['action'] == 'capture' and m['piece'] == 'P'
                 and not self.get(m['target'])):
             # en passant always comes from, and targets,
@@ -733,12 +827,13 @@ class Board:
                     if pinfo := self.is_pinned(m['piece'], side, piece_square):
                         if m['action'] != 'capture':
                             continue
-                        if pinfo[1] != m['target']:
-                            continue
-                        # pu.db
+                        # if pinfo[1] == m['target']:
+                        #     pu.db
+                        #     x = 1
+                        # else:
                         cap_target = self.get(m['target'])
-                        # if cap_target == pinfo[0]:
-                        #     points += POINTS[cap_target[0]]
+                        if cap_target == pinfo[0]:
+                            points += POINTS[cap_target[0]]
                     old = piece_square
                     new = m['target']
                     break
@@ -785,6 +880,7 @@ class Board:
             if not squares:
                 raise ValueError(f"No pieces of type {m} on board")
 
+            possibilities = set()
             # Iterate current origin squares of matching pieces
             for idx, piece_square in enumerate(squares):
 
@@ -798,14 +894,27 @@ class Board:
                     side=side, action=m['action'], board=self,
                     target=m['target'])
 
-                if m['target'] in dests and not self.is_pinned(m['piece'], side, piece_square):
+                if m['target'] in dests:
+                    possibilities.add((m['piece'], piece_square, m['target']))
+                """
+                if m['target'] in dests and not self.is_pinned(
+                        m['piece'], side, piece_square):
                     old = piece_square
                     new = m['target']
                     break
-                elif self.is_pinned(m['piece'], side, piece_square):
+                elif pinfo := self.is_pinned(m['piece'], side, piece_square):
+                    # OK but is it still pinned in the new position?
                     pu.db
-                    y = 1
+                    if not check_for_pin(pinfo[0][0], pinfo[1],
+                                         self, pinfo[0][1], return_pin=True):
+                        pu.db
+                        y = 1
+                """
 
+            if len(possibilities) == 1:
+                old, new = possibilities.pop()[1:]
+            else:
+                pu.db
             if old is None or new is None:
                 pu.db
                 x = 1
@@ -1023,11 +1132,14 @@ def process_games_multi(pgn_parser: PGNStreamSlicer, process_count: int, pgn_lim
     return merged
 
 
+DEBUG_SPLIT_RX = re.compile(r"^(?P<game_num>\d+)\D(?P<move_num>\d+)$")
+
 class GameDebug:
     def __init__(self, debug_at_game_move_csv=None):
-        if debug_at_game_move_csv:
-            self._game_num, self._move_num = (
-                int(x) for x in debug_at_game_move_csv.split(","))
+        if (debug_at_game_move_csv and
+                (m := Box(DEBUG_SPLIT_RX.match(
+                    debug_at_game_move_csv).groupdict()))):
+            self._game_num, self._move_num = int(m.game_num), int(m.move_num)
         else:
             self._game_num = None
             self._move_num = None
