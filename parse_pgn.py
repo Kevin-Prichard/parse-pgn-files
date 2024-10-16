@@ -14,7 +14,7 @@ import sys
 import time
 from typing import List, Tuple, Callable, Text, Dict, Union
 
-from common import OPPO, PINS_RX
+from common import OPPO, PINS_RX, CHECKS_RX
 from pgn_parser import pgn_file
 from move_parser import agn, FILE_CHARS
 
@@ -48,8 +48,8 @@ LINE_TYPE = {
 
 
 PAWN_ACTION = {
-    'W': {'start': 1, 'first': [2, 3], 'advance': 1, 'capture': 1},
-    'B': {'start': 6, 'first': [5, 4], 'advance': -1, 'capture': -1}
+    'W': {'start': 1, 'first': [2, 3], 'advance': 1, 'capture': 1, 'promote': 6},
+    'B': {'start': 6, 'first': [5, 4], 'advance': -1, 'capture': -1, 'promote': 1}
 }
 EMPTY_PIN = tuple()
 
@@ -259,6 +259,17 @@ def dests_common(square, coord_alters):
     return dests
 
 
+class IsChecked:
+    pass
+
+
+class IsPinned:
+    pass
+
+
+class AmbiguousMoveError(Exception):
+    pass
+
 BISHOP_DELTAS = (
     (-1, 1), (1, 1),
     (1, -1), (-1, -1))
@@ -273,7 +284,9 @@ ROOK_DELTAS = (
     (1, 0), (0, -1))
 
 
-def check_for_pin(piece, square, board, side, return_pin=False):
+def eval_king_state(piece, square, board, side,
+                    return_result=False,
+                    edits: Union[Dict, None]=None):
     """
     This is a post-move check, determines whether a Q|R|B piece's new location
     is pinning an opponent piece to the opponent king
@@ -286,12 +299,12 @@ def check_for_pin(piece, square, board, side, return_pin=False):
         case 'Q':
             deltas = QUEEN_DELTAS
         case _:
-            return False
+            raise ValueError(f"Unexpected piece type: {piece}")
 
     start = mk_coords(square)
     opking_sq = board.by_piece('K', OPPO[side])[0]
     if not opking_sq:
-        return False
+        raise ValueError(f"Opponent's king not found: {OPPO[side]}")
     opking = mk_coords(opking_sq)
     kdx, kdy = opking[0] - start[0], opking[1] - start[1]
 
@@ -309,9 +322,10 @@ def check_for_pin(piece, square, board, side, return_pin=False):
         # starting point is current piece square
         new_file, new_rank = start[0], start[1]
 
-        pin_stripe = [piece_at := board.get_coords(new_rank, new_file) or "  "]
-        # if piece_at is None:
-        #     pu.db
+        if edits and square in edits:
+            pin_stripe = [edits[square] or "  "]
+        else:
+            pin_stripe = [board.get_coords(new_rank, new_file) or "  "]
 
         pinned_piece = None
         pinned_sq = None
@@ -326,15 +340,20 @@ def check_for_pin(piece, square, board, side, return_pin=False):
                 break
 
             # get text representation of piece at new square
-            piece_at = board.get_coords(file=new_file, rank=new_rank)
+            a_square = mk_square(new_file, new_rank)
+            if edits and a_square in edits:
+                piece_at = edits[a_square]
+            else:
+                piece_at = board.get_coords(file=new_file, rank=new_rank)
+
             if piece_at:
                 if piece_at[1] == OPPO[side]:
-                    if not pinned_piece:
-                        pinned_piece = piece_at
-                        pinned_sq = mk_square(new_file, new_rank)
-                    elif piece_at[0] == 'K':
+                    if piece_at[0] == 'K':
                         # two opponent pieces on this line: no pin
                         keep_on = False
+                    elif not pinned_piece:
+                        pinned_piece = piece_at
+                        pinned_sq = mk_square(new_file, new_rank)
                     else:
                         is_pin_line = False
                         keep_on = False
@@ -342,20 +361,28 @@ def check_for_pin(piece, square, board, side, return_pin=False):
 
             pin_stripe.append(piece_at or "  ")
 
-        if is_pin_line and pin_stripe and pinned_piece:
+        if is_pin_line and pin_stripe:  # and pinned_piece:
             # is opponent's king pinned?
             try:
-                if re.match(PINS_RX[side], "".join(pin_stripe)):
-                    print(f"PIN FOUND: {piece}{side} at {square} pins "
-                          f"{pinned_piece} at {pinned_sq} to {opking_sq}")
-                    if return_pin:
-                        return pinned_piece, pinned_sq, opking_sq
+                stripe = "".join(pin_stripe)
+                if PINS_RX[side].match(stripe):
+                    logger.debug(
+                        f"PIN FOUND: {piece}{side} at {square} pins "
+                        f"{pinned_piece} at {pinned_sq} to {opking_sq} "
+                        f"{'RP' if return_result else '-'}")
+                    if return_result:
+                        return IsPinned, (pinned_piece, pinned_sq, opking_sq)
                     board.add_pin(pinned_piece,
                                   pinned_sq,
                                   f"{piece}{side}",  # pinning piece
                                   square,            # pinning square
                                   opking_sq)         # opponent king square
-                    return True
+                    return IsPinned
+                elif CHECKS_RX[side].match(stripe):
+                    if return_result:
+                        return IsChecked, (f"{piece}{side}", square, opking_sq)
+                    board.add_check(f"{piece}{side}", square, opking_sq)
+                    return IsChecked
             except Exception as ee:
                 import traceback as tb
                 print(tb.format_exc())
@@ -363,14 +390,14 @@ def check_for_pin(piece, square, board, side, return_pin=False):
                 pu.db
                 x = 1
 
-    return False
+    return None
 
 
 def check_for_king_pin(board: 'Board', side):
     # Check oppo's sliders for pinning side's king
     for piece_type in "QRB":
         for square in board.by_piece(piece_type, OPPO[side]):
-            check_for_pin(piece_type, square, board, OPPO[side])
+            eval_king_state(piece_type, square, board, OPPO[side])
 
 
 def dests_radial(piece, square, radial_deltas, action, board, side):
@@ -466,21 +493,32 @@ def dests_pawn(square, side, action, board=None, target=None):
     if action == 'move':
         # move
         if start[1] == act['start']:
-            if not board.get(tsq := mk_square(start[0], act['first'][0])):
+            if not board.get(tsq := mk_square(
+                    start[0], act['first'][0])):
                 dests.add(tsq)
-                if not board.get(tsq := mk_square(start[0], act['first'][1])):
+                if not board.get(tsq := mk_square(
+                        start[0], act['first'][1])):
                     dests.add(tsq)
         else:
-            if not board.get(tsq := mk_square(start[0], start[1] + act['advance'])):
+            if not board.get(tsq := mk_square(
+                    start[0], start[1] + act['advance'])):
                 dests.add(tsq)
 
     if action == 'capture':
         if start[0] > 0:
-            if board.get(tsq := mk_square(start[0] - 1, start[1] + act['capture'])):
+            if board.get(tsq := mk_square(
+                    start[0] - 1, start[1] + act['capture'])):
                 dests.add(tsq)
         if start[0] < 7:
-            if board.get(tsq := mk_square(start[0] + 1, start[1] + act['capture'])):
+            if board.get(tsq := mk_square(
+                    start[0] + 1, start[1] + act['capture'])):
                 dests.add(tsq)
+
+    if action == 'promote':
+        if side == 'W' and start[1] >= act['promote']:
+            dests.add(mk_square(start[0], 7))
+        elif side == 'B' and start[1] <= act['promote']:
+            dests.add(mk_square(start[0], 0))
 
     return dests
 
@@ -496,6 +534,7 @@ class Board:
         self._pinned = dict()
         self._pinner = dict()
         self._king_pin = defaultdict(set)
+        self._checks = defaultdict(set)
         # self._pinner = dict()
         # self._gui_board, self._gui_board_window = prepare_board()
 
@@ -511,148 +550,111 @@ class Board:
         coords = mk_coords(square)
         self.board[coords[1]][coords[0]] = piece
 
+    def add_check(self, piece, square, king_sq):
+        self._checks[king_sq].add((piece, square))
+
+    def is_checked(self, king_sq, side):
+        czech_piece, czech_sq = self._checks.get(king_sq)
+        is_checked, check_info = eval_king_state(
+            piece=czech_piece, square=czech_sq, board=self,
+            side=side, return_result=True, edits=None)
+        if is_checked is not IsChecked:
+            return False
+        return check_info
+
     def add_pin(self, pinned_piece, pinned_sq, pinning_piece, pinning_sq, king_sq):
-        self._pinned[pinned_piece, pinned_sq] = (pinning_piece, pinning_sq, king_sq)
+
+        # A piece can pin only a single piece to opponent king
+        if ((pinning_piece, pinning_sq) in self._pinner and
+                self._pinner[pinning_piece, pinning_sq] !=
+                (pinned_piece, pinned_sq, king_sq)):
+            logger.debug(
+                f"REPLACING PINNED PIECE: "
+                f"{self._pinner[pinning_piece, pinning_sq]} "
+                f"with {(pinned_piece, pinned_sq, king_sq)}")
         self._pinner[pinning_piece, pinning_sq] = (pinned_piece, pinned_sq, king_sq)
-        self._king_pin[king_sq] = (pinned_piece, pinned_sq, pinning_piece, pinning_sq)
+
+        # A piece can be pinned by only one opponent piece at a time
+        if ((pinned_piece, pinned_sq) in self._pinned and
+                self._pinned[pinned_piece, pinned_sq] !=
+                (pinning_piece, pinning_sq, king_sq)):
+            pu.db
+        self._pinned[pinned_piece, pinned_sq] = (pinning_piece, pinning_sq, king_sq)
+
+        # A king can have more than one piece pinned to it
+        self._king_pin[king_sq].add((pinned_piece, pinned_sq, pinning_piece, pinning_sq))
 
     def is_pinned(self, piece, side, square) -> [None, Tuple[str, str, str]]:
-        return self._pinned.get((f"{piece}{side}", square), None)
+        return self._pinned.get((f"{piece}{side}", square))
 
     def review_pins(self):
         tasks = []
         # Review pinners to see if they are still pinning
         for pinner, pinfo in self._pinner.items():
             # If a remembered pinner isn't pinning, queue to remove the pin
-            if not check_for_pin(pinner[0][0], pinner[1], self,
-                                 pinner[0][1], return_pin=True):
-                tasks.append((pinner, pinfo))
-
+            try:
+                result = eval_king_state(
+                    pinner[0][0], pinner[1], self,
+                    pinner[0][1], return_result=True)
+                if result is not None:
+                    is_pinned, new_pinfo = result
+                if result is None or is_pinned is not IsPinned or not new_pinfo or new_pinfo != pinfo:
+                    tasks.append((pinner, pinfo))
+            except Exception as eee:
+                pu.db
+                x = 1
         # Must defer removal of pins until all pins have been reviewed,
         # because that would interrupt iteration of dict self._pinner
         for pinner, pinfo in tasks:
             try:
-                if debug_this and debug_this.now():
+                if type(pinfo) == bool:
                     pu.db
-                print(f"PIN REMOVED*** {pinner[0]} at {pinner[1]} pins "
-                      f"{pinfo[0]} at {pinfo[1]} to {pinfo[2]}")
+                logger.debug(
+                    f"PIN REMOVED*** {pinner[0]} at {pinner[1]} pins "
+                    f"{pinfo[0]} at {pinfo[1]} to {pinfo[2]}")
+
+                # Remove pinner
                 del self._pinner[pinner]
+
+                # Remove pinned piece
+                if pinfo[:2] not in self._pinned:
+                    pu.db
                 del self._pinned[pinfo[:2]]
-                if
-                del self._king_pin[pinfo[2]]
+
+                # Remove king pin if no longer pinned against, or no longer on that space
+                if pinfo[2] not in self._king_pin:
+                    pu.db
+                self._king_pin[pinfo[2]].remove((*pinfo[:2], *pinner))
+                if not self._king_pin[pinfo[2]]:
+                    del self._king_pin[pinfo[2]]
+
             except Exception as ee:
+                import traceback as tb
+                print(tb.format_exc())
                 pu.db
                 x = 1
 
-    def resolve_pins(self, from_sq, from_piece, to_sq, to_piece, is_capture):
+    def review_checks(self):
         """
-        If from_piece/sq is pinning another piece-
-          - remove from self._pinner
-          - remove the pinned piece from self._pinned
-          - remove self._king_pin
-        If from_piece/sq is pinned by another piece-
-          - If the pinner still pinning, error
-          - If the pinner is not pinning bc not on board, error
-`          - Else, remove from self._pinned
-        If to_piece/sq is pinning another piece and it's a capture-
-          - remove to_piece/sq from self._pinner
-          - remove its pinned piece
-          - remove self._king_pin
-        If to_piece/sq is pinning another piece and it's not a capture, error?
-        If to_piece/sq is pinned by another piece-
-          - remove to_piece/sq from self._pinned
+        The point of review_checks() is to
+        1) Remove checks that are no longer
+        2) Turn checks into pins if the checked side moves a piece to block
+           the check, whereupon that piece is pinned to the king
         """
-        pins_to_check = set()
-        try:
-            if not is_capture:
-                # Is this a king, and is a piece pinned to it?
-                if from_piece[0] == 'K' and (kingpin := self._king_pin.get(from_sq, EMPTY_PIN)):
-                    # TODO how is this possible?  The from_piece didn't move???
-                    if self.get(from_sq) == from_piece:
-                        pu.db
-                        raise ValueError(f"King {from_piece} at {from_sq} "
-                                         f"is still pinning {kingpin}")
+        tasks = []
+        for king_sq, checks in self._checks.items():
+            for check in checks:
+                is_checked = eval_king_state(
+                    piece=check[0][0], square=check[1], board=self,
+                    side=check[0][1], return_result=False)
+                if is_checked is not IsChecked:
+                    tasks.append((king_sq, check))
 
-                    pinned_piece, pinned_sq, pinning_piece, pinning_sq = kingpin
-
-                    del self._pinned[pinned_piece, pinned_sq]
-                    del self._pinner[pinning_piece, pinning_sq]
-                    del self._king_pin[from_sq]
-                    pins_to_check.add((from_piece, to_sq))
-                    print(f"King pin resolved A: \nKing: {from_sq}\n"
-                          f"Pinned: {pinned_piece} at {pinned_sq}\n"
-                          f"Pinning: {pinning_piece} at {pinning_sq}")
-
-                # Was the from_piece/sq pinning another piece?
-                elif pinned := self._pinner.get((from_piece, from_sq), EMPTY_PIN):
-                    if pinned[0] is None or pinned[1] is None:
-                        pu.db
-                    # TODO is this even possible?  Pinner hadn't moved???
-                    if self.get(from_sq) == from_piece:
-                        pu.db
-                        raise ValueError(f"Piece {from_piece} at {from_sq} "
-                                         f"is still pinning {pinned}")
-
-                    del self._pinned[pinned[0], pinned[1]]
-                    del self._pinner[from_piece, from_sq]
-                    del self._king_pin[pinned[2]]
-                    pins_to_check.add((from_piece, to_sq))
-                    print(f"King pin resolved B: \nKing: {from_sq}\n"
-                          f"Pinned: {pinned[0]} at {pinned[1]}\n"
-                          f"Pinning: {from_piece} at {from_sq}")
-
-                # was from_piece/sq pinned by another piece?
-                elif pinner := self._pinned.get((from_piece, from_sq), EMPTY_PIN):
-                    pinner_piece, pinner_sq, king_sq = pinner
-                    # TODO how would this not be the case?
-                    if self.get(pinner_sq) == pinner_piece:
-                         if pin_res := check_for_pin(pinner_piece[0], pinner_sq,
-                                self, from_piece[1], return_pin=True):
-                            pinned_piece2, pinned_sq2 = pin_res
-                            if not (pinned_piece2 == from_piece and pinned_sq2 == to_sq):
-                                raise ValueError(f"Piece {from_piece} at {to_sq} isn't pinned by {pinner} ???")
-
-                    if king_sq not in self._king_pin:
-                        pu.db
-                    del self._pinned[from_piece, from_sq]
-                    del self._pinner[pinner_piece, pinner_sq]
-                    del self._king_pin[king_sq]
-                    pins_to_check.add((from_piece, to_sq))
-                    pins_to_check.add((pinner_piece, pinner_sq))
-                    print(f"King pin resolved C: {king_sq}\n"
-                          f"Pinned: {from_piece} at {from_sq}\n"
-                          f"Pinning: {pinner_piece} at {pinner_sq}")
-
-            else:
-                # Capturing to_piece/sq, was it pinned by another piece?
-                if pinner := self._pinned.get((to_piece, to_sq), EMPTY_PIN):
-                    pinner_piece, pinner_sq, king_sq = pinner
-                    del self._pinned[to_piece, to_sq]
-                    del self._pinner[pinner_piece, pinner_sq]
-                    del self._king_pin[king_sq]
-                    pins_to_check.add((pinner_piece, pinner_sq))
-                    pins_to_check.add((from_piece, to_sq))
-                    print(f"King pin resolved D1: {king_sq}\n"
-                          f"Pinned: {to_piece} at {to_sq}\n"
-                          f"Pinning: {pinner_piece} at {pinner_sq}")
-
-                # Capturing a pinner, was it pinning another piece?
-                elif pinned := self._pinner.get((to_piece, to_sq), EMPTY_PIN):
-                    pinned_piece, pinned_sq, king_sq = pinned
-                    del self._pinner[to_piece, to_sq]
-                    del self._pinned[pinned_piece, pinned_sq]
-                    del self._king_pin[king_sq]
-                    print(f"King pin resolved D2: {king_sq}\n"
-                          f"Pinned: {pinned_piece} at {to_sq}\n"
-                          f"Pinning: {from_piece} at {from_sq}")
-
-            return pins_to_check
-
-        except Exception as eee:
-            import traceback as tb
-            print(tb.format_exc())
-            import pudb; pu.db
-            x = 1
+        for king_sq, check in tasks:
+            self._checks[king_sq].remove(check)
+            logger.debug(f"CHECK REMOVED%%%: {check}")
+            if not self._checks[king_sq]:
+                del self._checks[king_sq]
 
     def reposition(self, from_sq, to_sq, is_capture=False):
         try:
@@ -672,17 +674,20 @@ class Board:
             self.board[old_coords[1]][old_coords[0]] = None
             self.board[new_coords[1]][new_coords[0]] = from_piece
 
-            # self.resolve_pins(from_sq, from_piece, to_sq, to_piece, is_capture)
             if self._pinned:
                 self.review_pins()
-            if from_piece[0] in "QRB":
-                check_for_pin(from_piece[0], to_sq, self, from_piece[1])
-            elif from_piece[0] == 'K':
+            if from_piece[0] == 'K':
                 check_for_king_pin(self, from_piece[1])
-            if self._pinned or self._pinner or self._king_pin:
-                print(f"*Pinners: {self._pinner}\n"
-                      f"*Pinned: {self._pinned}\n"
-                      f"*King pin: {self._king_pin}")
+            elif from_piece[0] in "QRB":
+                eval_king_state(from_piece[0], to_sq, self, from_piece[1])
+            if self._checks:
+                self.review_checks()
+            if self._pinned or self._pinner or self._king_pin or self._checks:
+                logger.debug(
+                    f"*Pinners: {self._pinner}\n"
+                    f"*Pinned: {self._pinned}\n"
+                    f"*King pin: {self._king_pin}\n"
+                    f"*Checks: {self._checks}")
 
         except Exception as ee:
             import traceback as tb
@@ -693,7 +698,8 @@ class Board:
     def redraw_gui_board(self):
         for rank in range(8):
             for file in range(8):
-                self._gui_board.psg_board[rank][file] = PSG[self.get_coords(rank, file)]
+                self._gui_board.psg_board[rank][file] = (
+                    PSG)[self.get_coords(rank, file)]
         self._gui_board.redraw_board(self._gui_board_window)
 
     def get(self, square) -> Union[str|None]:
@@ -704,7 +710,8 @@ class Board:
 
     def set(self, square, piece=None, side=None):
         try:
-            self.board[int(square[1])-1][ord(square[0])-FILE_BASE] = f"{piece}{side}" if piece else None
+            self.board[int(square[1])-1][ord(square[0])-FILE_BASE] = \
+                f"{piece}{side}" if piece else None
         except Exception as ee:
             print(self)
             import pudb; pu.db
@@ -796,16 +803,25 @@ class Board:
             points = 1
 
         elif m['action'] == 'promote' and 'target' in m:
-            dests = self.by_file(m['target'][0], m['piece'], side)
-            self.set(dests[0], piece=None)
-            self.set(m['target'], piece=m['replacement'], side=side)
-            self._pieces[f"{m['piece']}{side}"].remove(dests[0])
-            self._pieces[f"{m['replacement']}{side}"].add(m['target'])
+            potentials = set()
+            candidates = self.by_file(m['target'][0], m['piece'], side)
+            for piece_square in candidates:
+                if m['target'] in self.piece_dests(
+                        piece=m['piece'], start_square=piece_square,
+                        side=side, action=m['action'], board=self):
+                    potentials.add((piece_square, m['target']))
 
-            # We set old and new to avoid error at this method's end action,
-            # because action == 'promote' is ignored
-            old = dests[0]
-            new = m['target']
+            if len(potentials) == 1:
+                # We set old and new to avoid error at this method's end
+                # action, because action == 'promote' is ignored
+                old, new = potentials.pop()
+            else:
+                raise AmbiguousMoveError(
+                    f"Multiple possible moves for {m}:\n{potentials}")
+            self.set(old, piece=None)
+            self.set(new, piece=m['replacement'], side=side)
+            self._pieces[f"{m['piece']}{side}"].remove(old)
+            self._pieces[f"{m['replacement']}{side}"].add(new)
 
         elif 'actor_file' in m:
             squares = self.by_file(m['actor_file'], m['piece'], side)
@@ -819,32 +835,28 @@ class Board:
 
                 # Is the current move's destination in one of the piece's
                 # possible destinations?
-                dests = self.piece_dests(
+                candidates = self.piece_dests(
                         piece=m['piece'], start_square=piece_square,
                         side=side, action=m['action'], board=self)
 
                 if m['action'] == 'promote':
                     pu.db
                     old = piece_square
-                    new = dests[0]
+                    new = candidates[0]
                     break
-                elif m['target'] in dests:
-                    if pinfo := self.is_pinned(m['piece'], side, piece_square):
+                elif m['target'] in candidates:
+                    if pinner := self.is_pinned(m['piece'], side, piece_square):
                         if m['action'] != 'capture':
                             continue
-                        # if pinfo[1] == m['target']:
-                        #     pu.db
-                        #     x = 1
-                        # else:
                         cap_target = self.get(m['target'])
-                        if cap_target == pinfo[0]:
+                        if cap_target == pinner[0]:
                             points += POINTS[cap_target[0]]
                     old = piece_square
                     new = m['target']
                     break
             if old is None or new is None:
-                pu.db
-                x = 1
+                raise AmbiguousMoveError(
+                    f"Moving piece isn't found: {m}")
 
         elif 'actor_rank' in m:
             squares = self.by_rank(m['actor_rank'], m['piece'], side)
@@ -861,8 +873,8 @@ class Board:
                         new = m['target']
                         break
             if old is None or new is None:
-                pu.db
-                raise ValueError(f"Moving piece isn't found: {m}")
+                raise AmbiguousMoveError(
+                    f"Moving piece isn't found: {m}")
 
         elif 'actor_square' in m and not self.is_pinned(m['piece'], side, m['actor_square']):
             old = m['actor_square']
@@ -885,41 +897,45 @@ class Board:
             if not squares:
                 raise ValueError(f"No pieces of type {m} on board")
 
-            possibilities = set()
+            potentials = set()
             # Iterate current origin squares of matching pieces
             for idx, piece_square in enumerate(squares):
 
                 # Is the current move's destination in one of the piece's
                 # possible destinations?
                 if (m['piece'] == 'P' and 'target' in m
-                        and piece_square[0] != m['target'][0]):
+                        and (m['action'] == 'move' and piece_square[0] != m['target'][0])):
                     continue
-                dests = self.piece_dests(
+                candidates = self.piece_dests(
                     piece=m['piece'], start_square=piece_square,
                     side=side, action=m['action'], board=self,
                     target=m['target'])
 
-                if m['target'] in dests:
-                    possibilities.add((m['piece'], piece_square, m['target']))
-                """
-                if m['target'] in dests and not self.is_pinned(
-                        m['piece'], side, piece_square):
-                    old = piece_square
-                    new = m['target']
-                    break
-                elif pinfo := self.is_pinned(m['piece'], side, piece_square):
-                    # OK but is it still pinned in the new position?
-                    pu.db
-                    if not check_for_pin(pinfo[0][0], pinfo[1],
-                                         self, pinfo[0][1], return_pin=True):
-                        pu.db
-                        y = 1
-                """
+                if m['target'] in candidates:
+                    did_add = False
+                    if not (pinner := self.is_pinned(m['piece'],
+                                                     side, piece_square)):
+                        potentials.add((m['piece'], piece_square, m['target']))
+                        did_add = True
+                    else:
+                        # the piece currently is pinned pre-move;
+                        # does this move maintain the pin?
+                        # Peer into the future by applying the move to board state
+                        result = eval_king_state(
+                            pinner[0][0], pinner[1], self,
+                            pinner[0][1], return_result=True,
+                            edits={m['target']: f"{m['piece']}{side}",
+                                   piece_square: None})
+                        if result is None or result[0] is IsPinned:
+                                              #result[0] is not IsChecked:
+                            potentials.add((m['piece'], piece_square, m['target']))
+                            did_add = True
 
-            if len(possibilities) == 1:
-                old, new = possibilities.pop()[1:]
+            if len(potentials) == 1:
+                old, new = potentials.pop()[1:]
             else:
-                pu.db
+                raise AmbiguousMoveError(
+                    f"Multiple possible moves for {m}:\n{potentials}")
             if old is None or new is None:
                 pu.db
                 x = 1
@@ -963,29 +979,52 @@ class Board:
         return "\n".join(res)
 
 
+ambiguous_game_count = 0
+
 def run_game(moves, graph):
-    global en_passant
+    global en_passant, ambiguous_game_count
     b = Board()
     points = defaultdict(int)
     r = graph_root = graph
     en_passant = 0
+    if debug_this.game_now % 100 == 0:
+        logger.warning("Game: %d", debug_this.game_now)
 
     for a_move in moves:
         if a_move:
             debug_this.move_now = a_move['num']
             for move, side in ((a_move['white'], 'W'), (a_move['black'], 'B')):
                 if move:
-                    mj = agn.parse(move[0]).unwrap()
+                    try:
+                        mj = agn.parse(move[0]).unwrap()
+
+                    except Exception as e:
+                        import traceback as tb
+                        print(tb.format_exc())
+                        print(f"Error parsing move: {move}")
+                        pu.db
+                        x = 1
+
                     if not isinstance(mj, list):
                         mj = [mj]
                     for m in mj:
                         sidemove = f"{a_move['num']}{side}"
-                        print(f"[ep:{en_passant}]{debug_this.game_now}:{sidemove}.",
-                              a_move[SIDE_REPR[side]][0],
-                              json.dumps(m, sort_keys=True))
-
+                        move_header = (
+                            f"[ep:{en_passant}]{debug_this.game_now}:{sidemove}."
+                            f"{a_move[SIDE_REPR[side]][0]} ")
+                        logger.debug(move_header +
+                                     json.dumps(m, sort_keys=True))
                         try:
                             points[side] += b.move(m, side)
+
+                        except AmbiguousMoveError as ame:
+                            ambiguous_game_count += 1
+                            logger.error(
+                                f"Ambiguous move {move[0]}, "
+                                f"abandoning game: "
+                                f"{debug_this.game_now}:{sidemove}; "
+                                f"games abandoned: {ambiguous_game_count}")
+                            return
 
                         except Exception as ee:
                             import traceback as tb
@@ -996,7 +1035,7 @@ def run_game(moves, graph):
                         if args.show_board and debug_this.in_game(True):
                             # if args.show_board:  # and debug_this.in_game():
                             print(b, "\n")
-                        print(f"W:{points['W']}, B:{points['B']}")
+                        logger.debug(f"W:{points['W']}, B:{points['B']}")
                             # b.redraw_gui_board()
                             # if debug_this._game_num is None and input().lower() == 'q':
                             #     exit()
