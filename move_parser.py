@@ -36,12 +36,21 @@ def move_plural(content):  # plural piece move formatter
     res = {"piece": content[0],
            "action": "move",
            "target": content[2]}
-    if len(content[1]) > 1:
+    if (len(content[1]) == 2 and
+        content[1][0] in FILE_CHARS and
+        content[1][1] in RANK_CHARS):
+        # move specifies a from-square
         res.update(actor_square=content[1])
-    if content[1] in FILE_CHARS:
+    elif content[1] in FILE_CHARS:
+        # move specifies a file
         res.update(actor_file=content[1])
     elif content[1] in RANK_CHARS:
+        # move specifies a rank
         res.update(actor_rank=content[1])
+    else:
+        logger.error("move_plural: Unhandled content: {content}", {"content": content})
+        raise ValueError("move_plural: Unhandled content: %s" % content)
+
     return res
 
 
@@ -69,10 +78,21 @@ def take_plural(content):
     res = {"piece": content[0],
            "action": "capture",
            "target": content[3]}
-    if content[1] in FILE_CHARS:
+    if (len(content[1]) == 2 and
+        content[1][0] in FILE_CHARS and
+        content[1][1] in RANK_CHARS):
+        # move specifies a from-square
+        res.update(actor_square=content[1])
+    elif content[1] in FILE_CHARS:
+        # move specifies a file
         res.update(actor_file=content[1])
     elif content[1] in RANK_CHARS:
+        # move specifies a rank
         res.update(actor_rank=content[1])
+    else:
+        logger.error("move_plural: Unhandled content: {content}", {"content": content})
+        raise ValueError("move_plural: Unhandled content: %s" % content)
+
     return res
 
 
@@ -86,13 +106,12 @@ def promotion_fmt(content):
         }
     elif content[1] == 'x':
         return [{
-            "piece": content[4],
+            "piece": "P",
             "action": "capture",
             "target": content[2],
         }, {
             "piece": "P",
             "action": "promote",
-            "actor_file": content[0],
             "target": content[2],
             "replacement": content[4],
         }]
@@ -129,7 +148,7 @@ move = ((square > move_pawn)  # pawn
 
 capture = ((file & take & square > take_by_pawn)  # pawn
            | (piece & take & square > take_singular)  # singular piece
-           | (plural & locator & take & square > take_plural)  # plural piece
+           | (plural & (locator|square) & take & square > take_plural)  # plural piece
            )
 
 conversion = (square & convert & plural) > promotion_fmt
