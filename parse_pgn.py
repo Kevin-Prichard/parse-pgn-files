@@ -234,7 +234,7 @@ PSG = {
     None: 0, "": 0,
 }
 en_passant = 0
-
+promotions = 0
 
 def mk_coords(square):
     # returns array coordinates for self.board, (0..7, 0..7)
@@ -777,9 +777,11 @@ class Board:
         self.reposition(rook_origin, rook_dest)
 
     def move(self, m, side):
-        global en_passant
+        global en_passant, promotions
         points = 0
         old, new = None, None
+        if m['action'] == 'promote':
+            promotions += 1
 
         if (m['action'] == 'capture' and m['piece'] == 'P'
                 and not self.get(m['target'])):
