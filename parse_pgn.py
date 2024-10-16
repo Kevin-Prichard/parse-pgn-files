@@ -102,6 +102,9 @@ def get_args(argv: List[str]) -> Tuple[argparse.Namespace, ArgumentParser]:
                         type=str, action='store', default=None,
                         help="Process only this game number's PGN starting at "
                              "move #, i.e. -d 3,19 debugs at game 3, move 19 ")
+    parser.add_argument('--quick', '-k', dest='quick_skip',
+                        action='store_true', default=False,
+                        help="Skip to the game:move indicated by --debug")
 
     args = parser.parse_args(argv)
     return args, parser
@@ -1060,7 +1063,10 @@ def process_games_single(pgn_parser: PGNStreamSlicer, pgn_limit: int):
         "gcount": 0, "mcount": 0, "moves": dict(), "ograph": dict()})
     for pgn_num, pgn in enumerate(pgn_parser.next()):
         debug_this.game_now = pgn_num
-        handle_pgn(pgn, results)
+        if args.quick_skip and pgn_num < debug_this._game_num:
+            continue
+        else:
+            handle_pgn(pgn, results)
         if pgn_limit and pgn_num > pgn_limit:
             break
     return results
