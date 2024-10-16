@@ -3,7 +3,7 @@
 
 import argparse
 import copy
-from collections import defaultdict as dd
+from collections import defaultdict
 from enum import Enum
 import json
 import logging
@@ -484,7 +484,7 @@ def dests_pawn(square, side, action, board=None, target=None):
 
 class Board:
     def __init__(self, empty=False):
-        self._pieces = dd(set)
+        self._pieces = defaultdict(set)
         if not empty:
             self.board = copy.deepcopy(BOARD_STD)
             self._populate_pieces()
@@ -492,7 +492,7 @@ class Board:
             self.board = [[None] * 8 for _ in range(8)]
         self._pinned = dict()
         self._pinner = dict()
-        self._king_pin = dict()
+        self._king_pin = defaultdict(set)
         # self._pinner = dict()
         # self._gui_board, self._gui_board_window = prepare_board()
 
@@ -961,7 +961,7 @@ class Board:
 def run_game(moves, graph):
     global en_passant
     b = Board()
-    points = dd(int)
+    points = defaultdict(int)
     r = graph_root = graph
     en_passant = 0
 
@@ -1118,7 +1118,7 @@ def process_games_multi(pgn_parser: PGNStreamSlicer, process_count: int, pgn_lim
     for q in queues.values():
         q.put(None)
 
-    merged = dict(gcount=0, mcount=0, moves=dd(int))
+    merged = dict(gcount=0, mcount=0, moves=defaultdict(int))
     for p in processes:
         p.join()
         results = json.loads(process_to_queue[p].get())
