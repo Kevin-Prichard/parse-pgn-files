@@ -105,6 +105,9 @@ def get_args(argv: List[str]) -> Tuple[argparse.Namespace, ArgumentParser]:
     parser.add_argument('--quick', '-k', dest='quick_skip',
                         action='store_true', default=False,
                         help="Skip to the game:move indicated by --debug")
+    parser.add_argument('--graph', '-G', dest='track_opening_graph',
+                        action='store_true', default=False,
+                        help="Store opening moves in a graph")
 
     args = parser.parse_args(argv)
     return args, parser
@@ -183,12 +186,6 @@ todo = 34869171
 m = mp.Manager()
 
 POINTS = {'P': 1, 'N': 3, 'B': 3, 'R': 5, 'Q': 9}
-
-"""
-PROBLEM: we don't know which piece is is being taken, some of the time.
-We need a basic headless board to know what piece exists at a location,
-and then we can determine the value of the move.
-"""
 
 
 class Piece:
@@ -1024,6 +1021,7 @@ def run_game(moves, graph):
                                 f"abandoning game: "
                                 f"{debug_this.game_now}:{sidemove}; "
                                 f"games abandoned: {ambiguous_game_count}")
+                            print(b)
                             return
 
                         except Exception as ee:
@@ -1048,23 +1046,87 @@ def run_game(moves, graph):
                 import pudb; pu.db
                 x = 1
 
-            if key in graph:
-                graph[key]['gcount'] += 1
-                graph = graph[key]
-            else:
-                graph[key] = new_graph = dict(gcount=1)
-                graph = new_graph
+            if args.track_opening_graph:
+                if key in graph:
+                    graph[key]['gcount'] += 1
+                    graph = graph[key]
+                else:
+                    graph[key] = new_graph = dict(gcount=1)
+                    graph = new_graph
+            # {"e4": {"e5": {"count": 23}}}
+
+
+class Ply:
+    agn: str
+    points: int
+    score: int
+    next: dict['Ply', None]
+    prev: 'Ply'
+    def __init__(self, _agn: str, points: int, score: int, prev: 'Ply'):
+        self.agn = _agn
+        self.points = points
+        self.score = score
+        self.next = None
+        self.prev = prev
+
+    def add(self, ply: 'Ply'):
+        if self.next is None:
+            self.next = dict()
+        elif ply in self.next:
+            ply = self.next
+        self.next[ply] = None
+
+
+class Move:
+    # _all: dict['Move'] = dict()
+    ply1: Ply
+    ply2: Ply
+    next: dict['Move']
+    visits: int
+    net_points: int
+
+    def __init__(self, ply1, ply2):
+        self.ply1 = ply1
+        self.ply2 = ply2
+        self.next = None
+        self.visits = 0
+        self.net_points = ply1.points - ply2.points
+        if self not in Move._all:
+            Move._all.add(self)
+
+    def visit(self):
+        self.visits += 1
+
+    def add(self, ply1: Ply, ply2: Ply):
+        if self.next is None:
+            self.next = dict()
+        elif (ply1, ply2) in self.next:
+            move = self.next.
+        self.next.add(move)
+
+    def add_move(self, move: 'Move'):
+        if self.next is None:
+            self.next = set()
+        if move in self.next:
+            return self.next.(move)
+        self.next.add(move)
+
+    def moves(self):
+        return self.next
+
+    def __hash__(self):
+        return hash((self.ply1, self.ply2))
 
 
 def handle_pgn(pgn, results: dict):
-    result = pgn_file.parse(pgn)
-    if isinstance(result, Success):
-        result = result.unwrap()[0]
-        results['gcount'] += 1
-        run_game(result['game']['moves'], graph=results['ograph'])
+    game_parsed = pgn_file.parse(pgn)
+    if isinstance(game_parsed, Success):
+        game_parsed = game_parsed.unwrap()[0]
+        results.gcount += 1
+        run_game(game_parsed['game']['moves'], graph=results.ograph)
     else:
         logger.error(f"Error parsing PGN: {pgn}")
-        logger.error(result)
+        logger.error(game_parsed)
 
 
 def pgn_worker(queue: Queue, queue_id: Text, process_count: int):
@@ -1100,10 +1162,12 @@ def pgn_worker(queue: Queue, queue_id: Text, process_count: int):
 
 
 def process_games_single(pgn_parser: PGNStreamSlicer, pgn_limit: int):
-    results = dict({
-        "gcount": 0, "mcount": 0, "moves": dict(), "ograph": dict()})
+    results = Box(dict({
+        "gcount": 0, "mcount": 0, "moves": dict(), "ograph": dict(),
+        "bytes": 0}))
     for pgn_num, pgn in enumerate(pgn_parser.next()):
         debug_this.game_now = pgn_num
+        results.bytes += len(pgn)
         if args.quick_skip and pgn_num < debug_this._game_num:
             continue
         else:
