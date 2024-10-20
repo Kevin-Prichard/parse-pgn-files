@@ -1097,6 +1097,17 @@ class Ply:
             self.next.append(ply)
         return ply
 
+    def to_dict(self):
+        return {
+            "agn": self.agn,
+            "side": self.side,
+            "move": self.move,
+            "points": self.points,
+            "score": self.score,
+            "visits": self.visits,
+            "next": [n.to_dict() for n in self.next] if self.next else None
+        }
+
     def __str__(self):
         return (f"{self.move}. {self.side}:{self.agn} "
                 f"({self.points}/{self.score}/{self.visits})")
@@ -1122,8 +1133,10 @@ def pgn_worker(queue: Queue, queue_id: Text, process_count: int):
     logging.info("PROCESSQ: %s, %s -- %%%%%%%%%%%%",
                  str(queue), str(queue_id))
     work_count = 0
-    results = dict({
-        "gcount": 0, "mcount": 0, "moves": dict(), "ograph": dict()})
+    results = Box(dict({
+        "gcount": 0, "mcount": 0,
+        "ograph": Ply("root", side="", move=0, points=0, score=0, prev=None),
+        "bytes": 0}))
     while True:
         time.sleep(0.001)
         qsize = queue.qsize()
@@ -1152,8 +1165,8 @@ def pgn_worker(queue: Queue, queue_id: Text, process_count: int):
 
 def process_games_single(pgn_parser: PGNStreamSlicer, pgn_limit: int):
     results = Box(dict({
-        "gcount": 0, "mcount": 0, "moves": dict(),
-        "ograph": Ply("root", side="", move_num=0, points=0, score=0, prev=None),
+        "gcount": 0, "mcount": 0,
+        "ograph": Ply("root", side="", move=0, points=0, score=0, prev=None),
         "bytes": 0}))
     for pgn_num, pgn in enumerate(pgn_parser.next()):
         if debug_this:
@@ -1308,10 +1321,9 @@ def main(argv):
 
     with open(args.out_path, "w") as f:
         f.write(json.dumps({
-            "game_count": move_stats['gcount'],
-            "move_count": move_stats['mcount'],
-            "moves": sorted(move_stats['moves'].keys()),
-            "stats": {k: v for k, v in move_stats.items()},
+            "game_count": move_stats.gcount,
+            "move_count": move_stats.mcount,
+            "graph": move_stats.ograph.to_dict(),
         })+"\n\n")
 
 
