@@ -1044,9 +1044,6 @@ def run_game(moves, ply_root: 'Ply'):
                             print(b, "\n")
                         logger.debug(f"W:{points_side['W']}, "
                                      f"B:{points_side['B']}")
-                            # b.redraw_gui_board()
-                            # if debug_this._game_num is None and input().lower() == 'q':
-                            #     exit()
 
 class Ply:
     agn: str
@@ -1103,48 +1100,6 @@ class Ply:
 
 
 """
-class Move:
-    # _all: dict['Move'] = dict()
-    ply1: Ply
-    ply2: Ply
-    next: dict['Move']
-    visits: int
-    net_points: int
-
-    def __init__(self, ply1, ply2):
-        self.ply1 = ply1
-        self.ply2 = ply2
-        self.next = None
-        self.visits = 0
-        self.net_points = ply1.points - ply2.points
-        if self not in Move._all:
-            Move._all.add(self)
-
-    def visit(self):
-        self.visits += 1
-
-    def add(self, ply1: Ply, ply2: Ply):
-        if self.next is None:
-            self.next = dict()
-        elif (ply1, ply2) in self.next:
-            move = self.next.
-        self.next.add(move)
-
-    def add_move(self, move: 'Move'):
-        if self.next is None:
-            self.next = set()
-        if move in self.next:
-            return self.next.(move)
-        self.next.add(move)
-
-    def moves(self):
-        return self.next
-
-    def __hash__(self):
-        return hash((self.ply1, self.ply2))
-"""
-
-
 def handle_pgn(pgn, results: Box):
     game_parsed = pgn_file.parse(pgn)
     if isinstance(game_parsed, Success):
