@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 def formatannotations(annotations):
-    return {ant[0]: ant[1] for ant in annotations}
+    return {anno_part[0]: anno_part[1]
+            for anno_part in annotations}
 
 
 def formatgame(game):
