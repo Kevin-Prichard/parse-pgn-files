@@ -1020,7 +1020,7 @@ def run_game(moves, ply_root: 'Ply'):
                             points = b.move(m, side)
                             points_side[side] += points
                             ply = ply.add(
-                                _agn=move[0], side=side, move_num=move_now,
+                                _agn=move[0], side=side, move=move_now,
                                 points=points, score=points_side[side],
                                 prev=ply)
 
@@ -1050,18 +1050,19 @@ def run_game(moves, ply_root: 'Ply'):
 
 
 class Ply:
+    # instance props
     agn: str
     side: str
-    move_num: int
+    move: int
     points: int
     score: int
     next: list['Ply']
     prev: 'Ply'
-    def __init__(self, _agn: str, side: str, move_num: int,
+    def __init__(self, _agn: str, side: str, move: int,
                  points: int, score: int, prev: 'Ply'):
         self.agn = _agn
         self.side = side
-        self.move_num = move_num
+        self.move = move
         self.points = points
         self.score = score
         self.visits = 1
@@ -1076,28 +1077,28 @@ class Ply:
         if type(other) == Ply:
             return self == other
         elif type(other) == tuple:
-            return hash((self.agn, self.side, self.move_num)) == hash(other)
+            return hash((self.agn, self.side, self.move)) == hash(other)
         else:
             pu.db
         return False
 
-    def add(self, _agn: str, side: str, move_num: int,
+    def add(self, _agn: str, side: str, move: int,
             points: int, score: int, prev: 'Ply') -> 'Ply':
         ply = None
         if self.next:
-            if (_agn, side, move_num) in self.next:
+            if (_agn, side, move) in self.next:
                 # TODO: this is inefficient for large n!  might change to dict
-                ply = self.next[self.next.index((_agn, side, move_num))]
+                ply = self.next[self.next.index((_agn, side, move))]
                 ply.visits += 1
         if ply is None:
-            ply = Ply(_agn, side, move_num, points, score, prev)
+            ply = Ply(_agn, side, move, points, score, prev)
             if self.next is None:
                 self.next = []
             self.next.append(ply)
         return ply
 
     def __str__(self):
-        return (f"{self.move_num}. {self.side}:{self.agn} "
+        return (f"{self.move}. {self.side}:{self.agn} "
                 f"({self.points}/{self.score}/{self.visits})")
 
     __repr__ = __str__
