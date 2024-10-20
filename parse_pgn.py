@@ -984,11 +984,13 @@ def run_game(moves, ply_root: 'Ply'):
     points_side = defaultdict(int)
     game_now = debug_this.game_now if debug_this else 0
     en_passant = 0
+    mcount = 0
     if debug_this and debug_this.game_now % 100 == 0:
         logger.warning("Game: %d", game_now)
     ply = ply_root
 
     for a_move in moves:
+        mcount += 1
         if a_move:
             move_now = a_move['num']
             if debug_this:
@@ -1030,7 +1032,7 @@ def run_game(moves, ply_root: 'Ply'):
                                 f"{game_now}:{sidemove}; "
                                 f"games abandoned: {ambiguous_game_count}")
                             print(b)
-                            return
+                            return 0
 
                         except Exception as ee:
                             import traceback as tb
@@ -1044,6 +1046,8 @@ def run_game(moves, ply_root: 'Ply'):
                             print(b, "\n")
                         logger.debug(f"W:{points_side['W']}, "
                                      f"B:{points_side['B']}")
+    return mcount
+
 
 class Ply:
     agn: str
@@ -1099,13 +1103,15 @@ class Ply:
     __repr__ = __str__
 
 
-"""
 def handle_pgn(pgn, results: Box):
     game_parsed = pgn_file.parse(pgn)
     if isinstance(game_parsed, Success):
         game_parsed = game_parsed.unwrap()[0]
-        results.gcount += 1
-        run_game(game_parsed['game']['moves'], results.ograph)
+        mcount = run_game(game_parsed['game']['moves'], results.ograph)
+        # skip abandoned games
+        if mcount:
+            results.mcount += mcount
+            results.gcount += 1
     else:
         logger.error(f"Error parsing PGN: {pgn}")
         logger.error(game_parsed)
