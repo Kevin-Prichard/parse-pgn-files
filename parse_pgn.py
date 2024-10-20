@@ -978,18 +978,21 @@ class Board:
 
 ambiguous_game_count = 0
 
-def run_game(moves, graph):
+def run_game(moves, ply_root: 'Ply'):
     global en_passant, ambiguous_game_count
     b = Board()
-    points = defaultdict(int)
-    r = graph_root = graph
+    points_side = defaultdict(int)
+    game_now = debug_this.game_now if debug_this else 0
     en_passant = 0
-    if debug_this.game_now % 100 == 0:
-        logger.warning("Game: %d", debug_this.game_now)
+    if debug_this and debug_this.game_now % 100 == 0:
+        logger.warning("Game: %d", game_now)
+    ply = ply_root
 
     for a_move in moves:
         if a_move:
-            debug_this.move_now = a_move['num']
+            move_now = a_move['num']
+            if debug_this:
+                debug_this.move_now = move_now
             for move, side in ((a_move['white'], 'W'), (a_move['black'], 'B')):
                 if move:
                     try:
@@ -1007,19 +1010,24 @@ def run_game(moves, graph):
                     for m in mj:
                         sidemove = f"{a_move['num']}{side}"
                         move_header = (
-                            f"[ep:{en_passant}]{debug_this.game_now}:{sidemove}."
+                            f"[ep:{en_passant}]{game_now}:{sidemove}."
                             f"{a_move[SIDE_REPR[side]][0]} ")
                         logger.debug(move_header +
                                      json.dumps(m, sort_keys=True))
                         try:
-                            points[side] += b.move(m, side)
+                            points = b.move(m, side)
+                            points_side[side] += points
+                            ply = ply.add(
+                                _agn=move[0], side=side, move_num=move_now,
+                                points=points, score=points_side[side],
+                                prev=ply)
 
                         except AmbiguousMoveError as ame:
                             ambiguous_game_count += 1
                             logger.error(
                                 f"Ambiguous move {move[0]}, "
                                 f"abandoning game: "
-                                f"{debug_this.game_now}:{sidemove}; "
+                                f"{game_now}:{sidemove}; "
                                 f"games abandoned: {ambiguous_game_count}")
                             print(b)
                             return
@@ -1027,56 +1035,74 @@ def run_game(moves, graph):
                         except Exception as ee:
                             import traceback as tb
                             tb.print_exception(ee)
+                            print(b)
                             import pudb; pu.db
                             x = 1
 
-                        if args.show_board and debug_this.in_game(True):
+                        if (args and args.show_board) or (debug_this and debug_this.in_game()):
                             # if args.show_board:  # and debug_this.in_game():
                             print(b, "\n")
-                        logger.debug(f"W:{points['W']}, B:{points['B']}")
+                        logger.debug(f"W:{points_side['W']}, "
+                                     f"B:{points_side['B']}")
                             # b.redraw_gui_board()
                             # if debug_this._game_num is None and input().lower() == 'q':
                             #     exit()
 
-            try:
-                key = (a_move['white'][0],
-                       a_move['black'][0] if a_move['black'] else None,
-                       points['W'] - points['B'])
-            except Exception as eee:
-                import pudb; pu.db
-                x = 1
-
-            if args.track_opening_graph:
-                if key in graph:
-                    graph[key]['gcount'] += 1
-                    graph = graph[key]
-                else:
-                    graph[key] = new_graph = dict(gcount=1)
-                    graph = new_graph
-            # {"e4": {"e5": {"count": 23}}}
-
-
 class Ply:
     agn: str
+    side: str
+    move_num: int
     points: int
     score: int
-    next: dict['Ply', None]
+    next: list['Ply']
     prev: 'Ply'
-    def __init__(self, _agn: str, points: int, score: int, prev: 'Ply'):
+    def __init__(self, _agn: str, side: str, move_num: int,
+                 points: int, score: int, prev: 'Ply'):
         self.agn = _agn
+        self.side = side
+        self.move_num = move_num
         self.points = points
         self.score = score
+        self.visits = 1
         self.next = None
         self.prev = prev
 
-    def add(self, ply: 'Ply'):
-        if self.next is None:
-            self.next = dict()
-        elif ply in self.next:
-            ply = self.next
-        self.next[ply] = None
+    def __hash__(self):
+        return hash((self.agn, self.side, self.points))
+
+    def __eq__(self, other):
+        # pu.db
+        if type(other) == Ply:
+            return self == other
+        elif type(other) == tuple:
+            return hash((self.agn, self.side, self.move_num)) == hash(other)
+        else:
+            pu.db
+        return False
+
+    def add(self, _agn: str, side: str, move_num: int,
+            points: int, score: int, prev: 'Ply') -> 'Ply':
+        ply = None
+        if self.next:
+            if (_agn, side, move_num) in self.next:
+                # TODO: this is inefficient for large n!  might change to dict
+                ply = self.next[self.next.index((_agn, side, move_num))]
+                ply.visits += 1
+        if ply is None:
+            ply = Ply(_agn, side, move_num, points, score, prev)
+            if self.next is None:
+                self.next = []
+            self.next.append(ply)
+        return ply
+
+    def __str__(self):
+        return (f"{self.move_num}. {self.side}:{self.agn} "
+                f"({self.points}/{self.score}/{self.visits})")
+
+    __repr__ = __str__
 
 
+"""
 class Move:
     # _all: dict['Move'] = dict()
     ply1: Ply
@@ -1116,14 +1142,15 @@ class Move:
 
     def __hash__(self):
         return hash((self.ply1, self.ply2))
+"""
 
 
-def handle_pgn(pgn, results: dict):
+def handle_pgn(pgn, results: Box):
     game_parsed = pgn_file.parse(pgn)
     if isinstance(game_parsed, Success):
         game_parsed = game_parsed.unwrap()[0]
         results.gcount += 1
-        run_game(game_parsed['game']['moves'], graph=results.ograph)
+        run_game(game_parsed['game']['moves'], results.ograph)
     else:
         logger.error(f"Error parsing PGN: {pgn}")
         logger.error(game_parsed)
@@ -1163,12 +1190,15 @@ def pgn_worker(queue: Queue, queue_id: Text, process_count: int):
 
 def process_games_single(pgn_parser: PGNStreamSlicer, pgn_limit: int):
     results = Box(dict({
-        "gcount": 0, "mcount": 0, "moves": dict(), "ograph": dict(),
+        "gcount": 0, "mcount": 0, "moves": dict(),
+        "ograph": Ply("root", side="", move_num=0, points=0, score=0, prev=None),
         "bytes": 0}))
     for pgn_num, pgn in enumerate(pgn_parser.next()):
-        debug_this.game_now = pgn_num
+        if debug_this:
+            debug_this.game_now = pgn_num
+        if debug_this and debug_this.now(): pu.db
         results.bytes += len(pgn)
-        if args.quick_skip and pgn_num < debug_this._game_num:
+        if debug_this and args and args.quick_skip and pgn_num < debug_this._game_num:
             continue
         else:
             handle_pgn(pgn, results)
@@ -1255,8 +1285,8 @@ class GameDebug:
             self._game_num = None
             self._move_num = None
 
-        self._game_now = None
-        self._move_now = None
+        self._game_now = 0
+        self._move_now = 0
 
     @property
     def game_now(self):
