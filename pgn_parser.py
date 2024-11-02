@@ -37,6 +37,15 @@ def handle_optional(optionalmove):
         return None
 
 
+def move_list(_moves):
+    print(f"*** moves *** {_moves}")
+    return _moves
+
+
+def moves(movestr):
+    return movestr
+
+
 def handle_move(move):
     """
     Normal move:
@@ -143,17 +152,21 @@ split_turn = move_number & (
                 opt(move << whitespace & (
                    opt(move_comment << whitespace))) > handle_optional))
 turn = (standard_turn | split_turn) > handle_move
+turns = rep(turn)   # > move_list
 
 draw = lit('1/2-1/2')
 white = lit('1-0')
 black = lit('0-1')
 outcome = draw | white | black | unfinished
 
-game = (rep(turn) & outcome) > formatgame
+game = (turns & outcome) > formatgame
 
 # A PGN entry is annotations and the game
-entry = ((annotations << rep(whitespace)) & (
+pgn_entry = ((annotations << rep(whitespace)) & (
         game << rep(whitespace))) > formatentry
 
+pgn_split = ((annotations << rep(whitespace)) & (
+        reg(r'.+') << rep(whitespace) > moves))
+
 # A file is repeated entries
-pgn_file = rep(entry)
+pgn_file = rep(pgn_entry)

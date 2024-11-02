@@ -4,6 +4,7 @@
 import argparse
 import copy
 from collections import defaultdict
+import datetime as dt
 from enum import Enum
 import json
 import logging
@@ -15,7 +16,7 @@ import time
 from typing import List, Tuple, Callable, Text, Dict, Union
 
 from common import OPPO, PINS_RX, CHECKS_RX
-from pgn_parser import pgn_file
+from pgn_parser import pgn_file, pgn_split
 from move_parser import agn, FILE_CHARS
 
 from box import Box
@@ -28,7 +29,7 @@ logger.setLevel(logging.WARNING)
 
 
 NAUGHTY_CHARS = re.compile(b'[^\n -~]+')
-
+TMPOUT = "/home/kev/projs/chessan/parse-pgn-files/tmp"
 
 # PGN file sections can be identified by the first character of the line,
 # which lets us break a PGN file into its constituent parts
@@ -53,6 +54,11 @@ PAWN_ACTION = {
 }
 EMPTY_PIN = tuple()
 
+
+SCORE = ("0123456789"
+         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+         "abcdefghijklmnopqrstuvwxyz"
+         "~!@#$%^&*()-_=+[]{}|;:,.<>/?")
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -103,7 +109,7 @@ def get_args(argv: List[str]) -> Tuple[argparse.Namespace, ArgumentParser]:
                         help="Process only this game number's PGN starting at "
                              "move #, i.e. -d 3,19 debugs at game 3, move 19 ")
     parser.add_argument('--quick', '-k', dest='quick_skip',
-                        action='store_true', default=False,
+                        action='store', default=False, type=int,
                         help="Skip to the game:move indicated by --debug")
     parser.add_argument('--graph', '-G', dest='track_opening_graph',
                         action='store_true', default=False,
@@ -179,8 +185,11 @@ class PGNStreamSlicer:
             if this_type is not PGNParts.NEWLINE:
                 prev_type = this_type
 
+    def close(self):
+        self.pgn_file.close()
 
-start_time = last_time = time.time()
+
+start_time = time.time()
 todo = 34869171
 
 m = mp.Manager()
@@ -978,15 +987,16 @@ class Board:
 
 ambiguous_game_count = 0
 
-def run_game(moves, ply_root: 'Ply'):
+def run_game(moves, pgn_num, ply_root: 'Ply'):
     global en_passant, ambiguous_game_count
     b = Board()
     points_side = defaultdict(int)
     game_now = debug_this.game_now if debug_this else 0
     en_passant = 0
     mcount = 0
-    if debug_this and debug_this.game_now % 100 == 0:
-        logger.warning("Game: %d", game_now)
+    if pgn_num and pgn_num % 100 == 0:
+        templog and templog("Game: %d", pgn_num)
+    ply_root.visits += 1
     ply = ply_root
 
     for a_move in moves:
@@ -1004,15 +1014,20 @@ def run_game(moves, ply_root: 'Ply'):
                         import traceback as tb
                         print(tb.format_exc())
                         print(f"Error parsing move: {move}")
-                        pu.db
-                        x = 1
+                        ambiguous_game_count += 1
+                        logger.error(
+                            f"Error parsing move: {move[0]}, "
+                            f"abandoning game: {pgn_num}:{sidemove}; "
+                            f"games abandoned: {ambiguous_game_count}")
+                        print(b)
+                        return 0
 
                     if not isinstance(mj, list):
                         mj = [mj]
                     for m in mj:
                         sidemove = f"{a_move['num']}{side}"
                         move_header = (
-                            f"[ep:{en_passant}]{game_now}:{sidemove}."
+                            f"[ep:{en_passant}]{pgn_num}:{sidemove}."
                             f"{a_move[SIDE_REPR[side]][0]} ")
                         logger.debug(move_header +
                                      json.dumps(m, sort_keys=True))
@@ -1029,7 +1044,7 @@ def run_game(moves, ply_root: 'Ply'):
                             logger.error(
                                 f"Ambiguous move {move[0]}, "
                                 f"abandoning game: "
-                                f"{game_now}:{sidemove}; "
+                                f"{pgn_num}:{sidemove}; "
                                 f"games abandoned: {ambiguous_game_count}")
                             print(b)
                             return 0
@@ -1044,8 +1059,8 @@ def run_game(moves, ply_root: 'Ply'):
                         if (args and args.show_board) or (debug_this and debug_this.in_game()):
                             # if args.show_board:  # and debug_this.in_game():
                             print(b, "\n")
-                        logger.debug(f"W:{points_side['W']}, "
-                                     f"B:{points_side['B']}")
+                        logger.info(f"W:{points_side['W']}, "
+                                       f"B:{points_side['B']}")
     return mcount
 
 
@@ -1056,45 +1071,71 @@ class Ply:
     move: int
     points: int
     score: int
-    next: list['Ply']
+    next: Union[list['Ply'], tuple[str, str, str], None]
     prev: 'Ply'
+
+    # class props
+    ply_count: int = 0
     def __init__(self, _agn: str, side: str, move: int,
-                 points: int, score: int, prev: 'Ply'):
+                 points: int, score: int, visits: int = 0, prev: 'Ply' = None):
         self.agn = _agn
         self.side = side
         self.move = move
         self.points = points
         self.score = score
-        self.visits = 1
+        self.visits = visits
         self.next = None
         self.prev = prev
+        Ply.ply_count += 1
+
+    def __lt__(self, other):
+        return self.move < other.move
+
+    def __gt__(self, other):
+        return self.move > other.move
 
     def __hash__(self):
+        # print((self.agn, self.side, self.points),
+        #       hash((self.agn, self.side, self.points)))
         return hash((self.agn, self.side, self.points))
 
     def __eq__(self, other):
-        # pu.db
+        # print('__eq__')
+        result = False
         if type(other) == Ply:
-            return self == other
+            result = (self.agn, self.side, self.move) == (other.agn, other.side, other.move)
         elif type(other) == tuple:
-            return hash((self.agn, self.side, self.move)) == hash(other)
-        else:
-            pu.db
+            result = hash((self.agn, self.side, self.move)) == hash(other)
+        # if result:
+        #     if not self.next or not other.next:
+        #         return False
+        #     for ply in self.next:
+        #         if ply not in other:
+        #             return False
+        #         return True
+        return result
+
+    def __contains__(self, item):
+        for ply in self.next or []:
+            if ply == item:
+                return True
         return False
 
     def add(self, _agn: str, side: str, move: int,
-            points: int, score: int, prev: 'Ply') -> 'Ply':
+            points: int, score: int, visits: int = 0, prev: 'Ply'=None) -> 'Ply':
         ply = None
-        if self.next:
-            if (_agn, side, move) in self.next:
-                # TODO: this is inefficient for large n!  might change to dict
-                ply = self.next[self.next.index((_agn, side, move))]
-                ply.visits += 1
+        # if move == 1 and side == 'B':
+        #     pu.db
+        if (_agn, side, move) in self:
+            # TODO: this is inefficient for large n!  might change to dict
+            ply = self.next[self.next.index((_agn, side, move))]
         if ply is None:
-            ply = Ply(_agn, side, move, points, score, prev)
+            ply = Ply(_agn=_agn, side=side, move=move, points=points,
+                      score=score, visits=visits, prev=prev)
             if self.next is None:
                 self.next = []
             self.next.append(ply)
+        ply.visits += 1
         return ply
 
     def to_dict(self):
@@ -1108,6 +1149,73 @@ class Ply:
             "next": [n.to_dict() for n in self.next] if self.next else None
         }
 
+    def to_pretty(self):
+        return {
+            "m": self.pretty(),
+            "d": [n.to_pretty() for n in self.next] if self.next else []
+        }
+
+    def to_compact(self, depth=0, max_depth=None):
+        ret = [self.agn, self.side, self.points, self.visits]
+        if self.next and (max_depth is None or depth < max_depth):
+            ret.append([n.to_compact(depth=depth+1, max_depth=max_depth)
+                        for n in self.next])
+        return ret
+
+    def to_compact2(self, depth=0, max_depth=None):
+        ret = [f"{self.agn}|{self.side}|{self.points}|{self.visits}"]
+        if self.next and (max_depth is None or depth < max_depth):
+            ret.extend(n.to_compact2(depth=depth+1, max_depth=max_depth)
+                        for n in self.next)
+        return ret
+
+    def to_compact3(self, depth=0, max_depth=None):
+        ret = [f"{self.points}{SCORE[self.score]}{self.side}"
+               f"{self.visits}{self.agn}"]
+        if self.next and (not max_depth or depth < max_depth):
+            ret.extend(n.to_compact3(depth=depth+1, max_depth=max_depth)
+                        for n in sorted(self.next))
+        return ret
+
+    def pretty(self):
+        return (f'{self.move}.{self.side}:{self.agn}={self.points}/'
+                f'{self.score}({self.visits})')
+
+    @classmethod
+    def from_dict(cls, d):
+        ply = cls(_agn=d['agn'], side=d['side'], move=d['move'],
+                  points=d['points'], score=d['score'], visits=d['visits'],
+                  prev=d.get('prev', None))
+        if d['next']:
+            ply.next = [cls.from_dict(n) for n in d['next']]
+        return ply
+
+    def merge(self,  other):
+        # other is contributing to this ply tree
+        if (self.agn == other.agn and self.side == other.side and
+                self.move == other.move):
+                # self.points == other.points and self.score == other.score):
+            self.visits += other.visits
+
+            # Does other have children to contribute?
+            if other.next:
+                if self.next is None:
+                    self.next = other.next.copy()
+                else:
+                    for ply in other.next:
+                        if ply in self:
+                            self.next[self.next.index(ply)].merge(ply)
+                        else:
+                            self.next.append(ply)
+
+    def wideband(self, buffer=None):
+        mine = f"{self.side}|{self.agn}|{self.points}|{self.score}|{self.visits}"
+        buffer = buffer or []
+        buffer.append(mine)
+        if self.next:
+            for ply in self.next:
+                ply.wideband(buffer)
+
     def __str__(self):
         return (f"{self.move}. {self.side}:{self.agn} "
                 f"({self.points}/{self.score}/{self.visits})")
@@ -1115,11 +1223,40 @@ class Ply:
     __repr__ = __str__
 
 
-def handle_pgn(pgn, results: Box):
+def ply_graph2csv(ply_root: Ply) -> List[str]:
+    """
+    Convert the Ply class graph into CSV records.
+    Each record captures one entire path in the Ply graph.
+    Each record is a string in the format: "move,side,agn,points,score,visits"
+    """
+    records = []
+
+    def traverse(ply: Ply, path: List[str]):
+        # pu.db
+        if ply != ply_root:
+            path.append(ply.pretty())
+        if ply.next:
+            for next_ply in ply.next:
+                traverse(next_ply, path.copy())
+        else:
+            records.append(", ".join(path))
+
+    traverse(ply_root, [])
+    return records
+
+
+def handle_pgn(pgn, pgn_num: int, results: Box):
     game_parsed = pgn_file.parse(pgn)
+    # game_parts = pgn_split.parse(pgn)
+    # gp = game_parts.unwrap()
+    # print("GAME_PARTS %%%%%%%%%%%%%%%%%% ", len(gp), gp)
+    # print(gp[1])
     if isinstance(game_parsed, Success):
         game_parsed = game_parsed.unwrap()[0]
-        mcount = run_game(game_parsed['game']['moves'], results.ograph)
+        templog and templog("handle_pgn 0")
+        mcount = run_game(game_parsed['game']['moves'], pgn_num, results.ograph)
+        # print(game_parsed['game']['moves'])
+        templog and templog("handle_pgn 1")
         # skip abandoned games
         if mcount:
             results.mcount += mcount
@@ -1129,23 +1266,44 @@ def handle_pgn(pgn, results: Box):
         logger.error(game_parsed)
 
 
+def templog(msg, *params):
+    try:
+        proc_name = mp.context.process.current_process().name.split(':')[2]
+    except IndexError:
+        proc_name = mp.context.process.current_process().name
+    logger.warning(f"{proc_name}:{msg}", *params)
+
+templog = False
+
+
 def pgn_worker(queue: Queue, queue_id: Text, process_count: int):
     logging.info("PROCESSQ: %s, %s -- %%%%%%%%%%%%",
                  str(queue), str(queue_id))
     work_count = 0
     results = Box(dict({
-        "gcount": 0, "mcount": 0,
-        "ograph": Ply("root", side="", move=0, points=0, score=0, prev=None),
+        "gcount": 1, "mcount": 1,
+        "ograph": Ply("root", side="", move=0, points=0, score=0, visits=0, prev=None),
         "bytes": 0}))
     while True:
         time.sleep(0.001)
+        templog and templog("pgn_worker 0")
         qsize = queue.qsize()
         if qsize:
-            pgn = queue.get()
-            if pgn is None:
+            templog and templog("pgn_worker 1 haz queued pgns")
+            pgn_data = queue.get()
+            templog and templog("pgn_worker 2 got queued pgn")
+            if pgn_data is None:
+                templog and templog("pgn_worker 3 empty pgn")
+                results['ograph'] = results['ograph'].to_dict()
+                templog and templog("pgn_worker 4 shoving results")
                 queue.put(json.dumps(results))
+                templog and templog("pgn_worker 5 iz breaking")
                 break
-            handle_pgn(pgn, results)
+
+            pgn, pgn_num = pgn_data
+            templog and templog("pgn_worker 6 handling a PGN: %s", pgn[:60])
+            handle_pgn(pgn, pgn_num, results)
+            templog and templog("pgn_worker 7 done handling")
             work_count += 1
             if work_count % 500 == 0:
                 logger.info("working: %s, %d, %d", queue_id, qsize, len(pgn))
@@ -1162,23 +1320,27 @@ def pgn_worker(queue: Queue, queue_id: Text, process_count: int):
                           f"time left: {round(time_left / 3600, 2)} hrs, %s",
                           str(mp.current_process()))
 
+    templog and templog("pgn_worker 8 done")
+
 
 def process_games_single(pgn_parser: PGNStreamSlicer, pgn_limit: int):
     results = Box(dict({
         "gcount": 0, "mcount": 0,
-        "ograph": Ply("root", side="", move=0, points=0, score=0, prev=None),
+        "ograph": Ply("root", side="", move=0, points=0, score=0, visits=0, prev=None),
         "bytes": 0}))
-    for pgn_num, pgn in enumerate(pgn_parser.next()):
+    if not debug_this and args and args.quick_skip and args.quick_skip > 0:
+        for _ in range(args.quick_skip):
+            next(pgn_parser.next())
+    for pgn_num in range(pgn_limit):
+        pgn: str = next(pgn_parser.next())
         if debug_this:
             debug_this.game_now = pgn_num
-        if debug_this and debug_this.now(): pu.db
+            if debug_this.now(): pu.db
         results.bytes += len(pgn)
         if debug_this and args and args.quick_skip and pgn_num < debug_this._game_num:
             continue
         else:
-            handle_pgn(pgn, results)
-        if pgn_limit and pgn_num > pgn_limit:
-            break
+            handle_pgn(pgn, pgn_num, results)
     return results
 
 
@@ -1187,63 +1349,98 @@ def process_games_multi(pgn_parser: PGNStreamSlicer, process_count: int, pgn_lim
     processes = []
     process_to_queue = dict()
     mgr = mp.Manager()
+    # import pudb; pu.db
     for i in range(process_count):
         queue_id = f"queue_{i}"
         queues[queue_id] = this_q = mp.Queue()
-        x = Process(
+        proc = Process(
             target=pgn_worker,
             kwargs=dict(queue=this_q,
                         queue_id=queue_id,
                         process_count=process_count)
         )
-        process_to_queue[x] = this_q
-        processes.append(x)
-        logger.debug("process created: %s, %s", str(this_q), str(x))
+        process_to_queue[proc] = this_q
+        processes.append(proc)
+        logger.debug("process created: %s, %s", str(this_q), str(proc))
+        proc.start()
 
     logger.debug("Queues: %s", [", ".join(str(q) for q in queues)])
     started = False
     process_idx = 0
     queue_id = f"queue_{process_idx}"
     this_q = queues[queue_id]
+    if not debug_this and args and args.quick_skip and args.quick_skip > 0:
+        for _ in range(args.quick_skip):
+            next(pgn_parser.next())
     for pgn_num, pgn in enumerate(pgn_parser.next()):
+        # print(f"{pgn_num + 1}\\ {pgn}")
+        if debug_this:
+            debug_this.game_now = pgn_num
         if pgn_num % 1000 == 0:
-            logger.warning("pgn_num %d", pgn_num)
-        if pgn_limit and pgn_num > pgn_limit:
+            templog and templog("pgn_num %d", pgn_num)
+        if pgn_limit and pgn_num >= pgn_limit:
+            templog and templog("EXITING PGN LOOP %%%%%%%%%%%%%%%%%%%%%")
             break
+        # The problem now is that queues are receiving less than their cap,
+        # which leads to processes not being started.  Need to check for unstarted
+        # processes and start them
         loop_ctr = 0
         while True:
             if this_q.qsize() < queue_limit:
-                this_q.put(pgn)
+                this_q.put((pgn, pgn_num + 1))
+                print(f"putting: {pgn_num + 1} into {queue_id}")
                 break
+            # If a queue is full, we round-robin to the next queue, in a ring
             logger.info("Flipped the lid: %d, %d, %s", this_q.qsize(), pgn_num, process_idx)
             loop_ctr += 1
             process_idx = (process_idx + 1) % process_count
             queue_id = f"queue_{process_idx}"
             this_q = queues[queue_id]
-            if loop_ctr > process_count:
-                if not started:
-                    for process in processes:
-                        logger.debug("starting: %s", str(process))
-                        process.start()
-                    started = True
-                logger.info("JAMMED UP - all queues full, waiting to clear"
-                            "%d, %s, %d, %s",
-                      pgn_num, process_idx, loop_ctr, "*"*80)
-                time.sleep(1)
+            # if loop_ctr > process_count:
+            #     if not started:
+            #         for process in processes:
+            #             logger.debug("starting: %s", str(process))
+            #             process.start()
+            #         started = True
+            #     logger.info("JAMMED UP - all queues full, waiting to clear"
+            #                 "%d, %s, %d, %s",
+            #           pgn_num, process_idx, loop_ctr, "*"*80)
+            #     time.sleep(1)
+        templog and templog("Exited endless loop %s ********************", str(this_q))
 
-    for q in queues.values():
-        q.put(None)
+    templog and templog("Processed all PGNs")
 
-    merged = dict(gcount=0, mcount=0, moves=defaultdict(int))
+    for process, queue in process_to_queue.items():
+        templog and templog("Closing queues %s", str(process))
+        queue.put(None)
+        # if not process.is_alive():
+        #     process.start()
+
+    mother_of_all_plys = Ply("root", side="", move=0, points=0, score=0, visits=0, prev=None)
+    merged = dict(gcount=0, mcount=0,
+                 moves=defaultdict(int),
+                 ograph=mother_of_all_plys)
     for p in processes:
-        p.join()
-        results = json.loads(process_to_queue[p].get())
+        templog and templog("Joining0 %s", str(p))
+        p.join(1)
+        templog and templog("Joining1 %s", str(p))
+        results = json.loads(js:=process_to_queue[p].get())
+        with open(f"{TMPOUT}/res{mp.current_process().pid}."
+                  f"{p.pid}.json", "w") as f:
+            f.write(js)
         merged['gcount'] += results['gcount']
         merged['mcount'] += results['mcount']
-        for move, count in results['moves'].items():
-            merged['moves'][move] += count
+        mother_of_all_plys.merge(Ply.from_dict(results['ograph']))
+
+        # for move, count in results['moves'].items():
+        #     merged['moves'][move] += count
 
     mgr.shutdown()
+
+    merged['ograph'] = mother_of_all_plys  # .to_dict()
+    # with open(f"/tmp/mama-"
+    #           f"{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.json", "w") as f:
+    #     f.write(json.dumps(merged))
 
     return merged
 
@@ -1293,7 +1490,6 @@ class GameDebug:
                         self._game_now >= self._game_num)
         )
 
-
     def in_use(self):
         return self._game_num is not None
 
@@ -1309,23 +1505,52 @@ debug_this: GameDebug = None
 def main(argv):
     global debug_this
     args, args_parser = get_args(argv)
-    parser = PGNStreamSlicer(pgn_path=args.pgn_path)
+    parser = None
+    try:
+        parser = PGNStreamSlicer(pgn_path=args.pgn_path)
 
-    # if args.game_move_debug is not None:
-    debug_this = GameDebug(args.game_move_debug)
+        if args.game_move_debug is not None:
+            debug_this = GameDebug(args.game_move_debug)
 
-    if args.process_count > 1:
-        move_stats = process_games_multi(parser, args.process_count, args.pgn_limit, args.queue_limit)
-    else:
-        move_stats = process_games_single(parser, args.pgn_limit)
+        # pu.db
+        if args.process_count > 1:
+            move_stats = process_games_multi(parser, args.process_count, args.pgn_limit, args.queue_limit)
+            # pu.db
+            """
+            print("\n>>> ".join(
+                f"{num + 1}\\ {game}\n"
+                for num, game in enumerate(ply_graph2csv(move_stats["ograph"]))))
+            """
+            # print("\n\n", json.dumps(move_stats["ograph"].to_pretty(), indent=2))
+            # og = move_stats["ograph"]
 
+        else:
+            # pu.db
+            move_stats = process_games_single(parser, args.pgn_limit)
+            """
+            print("\n".join(
+                f"{num + 1}\\ {game}\n"
+                for num, game in enumerate(ply_graph2csv(move_stats["ograph"]))))
+            """
+    #        print("\n\n", json.dumps(move_stats["ograph"].to_pretty(), indent=2))
+
+        with open(f"{TMPOUT}/mama-{mp.current_process().pid}.json", "w") as f:
+            f.write(json.dumps(
+                move_stats["ograph"].to_compact3(max_depth=0),
+                indent=2,
+            ))
+    finally:
+        if parser:
+            parser.close()
+
+    """
     with open(args.out_path, "w") as f:
         f.write(json.dumps({
-            "game_count": move_stats.gcount,
-            "move_count": move_stats.mcount,
-            "graph": move_stats.ograph.to_dict(),
+            "game_count": move_stats["gcount"],
+            "move_count": move_stats["mcount"],
+            "graph": move_stats["ograph"].to_dict(),
         })+"\n\n")
-
+    """
 
 if __name__ == "__main__":
     main(sys.argv[1:])
